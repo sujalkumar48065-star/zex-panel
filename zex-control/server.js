@@ -192,7 +192,7 @@ async function bootstrap() {
       const url = String(process.env.RENDER_EXTERNAL_URL).replace(/\/+$/, '') + '/api/health';
       const ping = () => fetch(url).catch(() => {});
       setTimeout(ping, 30000);
-      setInterval(ping, 9 * 60 * 1000);
+      setInterval(ping, 4 * 60 * 1000);
       log('Self-ping enabled');
     }
   });
