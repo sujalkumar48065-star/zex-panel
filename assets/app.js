@@ -13,6 +13,7 @@ document.addEventListener('click',async e=>{
   if(act.startsWith('template:')){const kind=act.slice(9);projectModal({name:'',id:'',kind,start_command:'',files:{},env:{}});return}
   if(act.startsWith('manage-')){const p=liveProjects[+act.split('-')[1]];if(p)manageProject(p);return}
   if(act.startsWith('zex-edit:')){const p=zexProjectsMap[act.slice(9)];if(p)projectModal(p);return}
+  if(act.startsWith('rt-live-')){const m=act.match(/^rt-live-(start|stop|restart|logs):(.+)$/);if(m){if(m[1]==='logs')showRuntimeLogs(m[2]);else runtimeAction(m[2],m[1]);return}}
   if(act.startsWith('zex-del:')){
     const id=act.slice(8);openModal('Delete project','Remove '+id+' from ZEX CLOUD?',`<p class="key-note">The project is removed from the registry and both Kaggle sessions at the next safe handover.</p>`,'Delete',async()=>{await zexApi('/api/projects?id='+encodeURIComponent(id),'DELETE');toast('Deleted · applies at next handover');await loadProjects();if(current==='files')await loadFiles()});return
   }
@@ -61,43 +62,14 @@ $('#content').addEventListener('change',async e=>{
   }
 });
 (function(){
-  var gate=document.getElementById('zexGate');
-  var input=document.getElementById('zexPass');
-  var err=document.getElementById('zexErr');
-  var card=gate?gate.querySelector('.zex-card'):null;
-  var KEY='zex_panel_auth_v1';
-  async function unlock(){
-    if(!input)return;
-    var ok=false;
-    if(location.protocol==='http:'||location.protocol==='https:'){
-      try{
-        var r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:input.value})});
-        if(r.ok){var d=await r.json();if(d.token)sessionStorage.setItem('zex_token',d.token);ok=true}else{ok=false}
-      }catch(e){ok=false}
-    }
-    if(ok){
-      try{sessionStorage.setItem(KEY,'1')}catch(e){}
-      gate.classList.add('hide');
-      input.value='';
-      setTimeout(()=>{try{reloadCurrentPage()}catch(e){}},80);
-    } else {
-      err.textContent=(location.protocol==='file:')?'Run via the control server (http://localhost:3000).':'Wrong password. Try again.';
-      if(card){card.classList.remove('shake');void card.offsetWidth;card.classList.add('shake')}
-      input.select();
-    }
-  }
-  function lock(){
-    try{sessionStorage.removeItem(KEY)}catch(e){}
-    location.reload();
-  }
-  try{if(sessionStorage.getItem(KEY)==='1'&&gate)gate.classList.add('hide')}catch(e){}
-  if(gate){
-    document.getElementById('zexLoginBtn').addEventListener('click',unlock);
-    input.addEventListener('keydown',function(e){if(e.key==='Enter')unlock()});
-    input.addEventListener('input',function(){err.textContent=''});
-    document.getElementById('zexEye').addEventListener('click',function(){var t=input.type==='password';input.type=t?'text':'password';this.textContent=t?'◉':'◌'});
-  }
   var lo=document.getElementById('logoutBtn');
-  if(lo)lo.addEventListener('click',lock);
+  if(lo)lo.addEventListener('click',function(){try{sessionStorage.removeItem('zex_token');sessionStorage.removeItem('zex_panel_auth_v1')}catch(e){};location.href='login.html'});
 })();
-render();
+function startRuntimePoll(){
+  if(runtimePollTimer)clearInterval(runtimePollTimer);
+  runtimePollTimer=setInterval(function(){if(document.hidden)return;if(document.getElementById('content'))loadLiveRuntime()},5000);
+}
+(function(){
+  if(!sessionStorage.getItem('zex_token')){location.replace('login.html');return}
+  render();startRuntimePoll();setTimeout(loadLiveRuntime,800);
+})();
