@@ -1,0 +1,22 @@
+
+#zexGate{position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;padding:22px;background:radial-gradient(ellipse at 82% 0%,rgba(121,78,180,.24),transparent 42%),radial-gradient(ellipse at 0% 100%,rgba(61,125,151,.2),transparent 42%),#0b0a12;font-family:'DM Sans',system-ui,-apple-system,sans-serif;color:#f7f4fc}
+#zexGate.hide{display:none}
+#zexGate .zex-card{width:100%;max-width:392px;background:linear-gradient(160deg,rgba(28,25,43,.94),rgba(15,13,24,.97));border:1px solid rgba(220,204,255,.15);border-radius:22px;padding:32px 28px 26px;box-shadow:0 34px 90px rgba(0,0,0,.6),inset 0 1px 0 rgba(255,255,255,.05);backdrop-filter:blur(22px)}
+#zexGate .zex-logo{width:52px;height:52px;border-radius:15px;display:grid;place-items:center;font-size:24px;color:#efe9ff;background:linear-gradient(145deg,#a78bfa,#6d4fd0);box-shadow:0 10px 26px rgba(140,102,240,.45);margin-bottom:18px}
+#zexGate h1{margin:0;font-family:Manrope,'DM Sans',sans-serif;font-size:24px;font-weight:800;letter-spacing:.14em}
+#zexGate .sub{margin:4px 0 0;font-size:11px;letter-spacing:.22em;color:#a78bfa;font-weight:700;text-transform:uppercase}
+#zexGate .msg{margin:18px 0 22px;font-size:13px;line-height:1.6;color:#a7a0b6}
+#zexGate label{display:block;font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:#9d95ad;font-weight:600;margin-bottom:8px}
+#zexGate .zex-field{position:relative;margin-bottom:14px}
+#zexGate input{width:100%;box-sizing:border-box;padding:13px 46px 13px 15px;border-radius:12px;border:1px solid rgba(220,204,255,.16);background:rgba(10,9,17,.7);color:#f7f4fc;font-size:15px;outline:none;transition:.18s;font-family:inherit}
+#zexGate input:focus{border-color:#a78bfa;box-shadow:0 0 0 3px rgba(167,139,250,.16)}
+#zexGate .eye{position:absolute;right:8px;top:50%;transform:translateY(-50%);background:none;border:0;color:#a7a0b6;font-size:16px;cursor:pointer;padding:8px;border-radius:8px}
+#zexGate .eye:hover{color:#f7f4fc}
+#zexGate .zex-btn{width:100%;padding:13px;border:0;border-radius:12px;background:linear-gradient(145deg,#a78bfa,#7c5ce0);color:#120e1f;font-weight:800;font-size:14px;letter-spacing:.02em;cursor:pointer;transition:.18s;box-shadow:0 12px 28px rgba(124,92,224,.35)}
+#zexGate .zex-btn:hover{filter:brightness(1.08);transform:translateY(-1px)}
+#zexGate .zex-btn:active{transform:translateY(0)}
+#zexGate .err{min-height:18px;margin:10px 0 2px;font-size:12.5px;color:#ff8f9c}
+#zexGate .foot{margin-top:20px;padding-top:16px;border-top:1px solid rgba(220,204,255,.1);display:flex;justify-content:space-between;align-items:center;font-size:11px;color:#777084}
+#zexGate .dot{width:7px;height:7px;border-radius:50%;background:#63d8bd;display:inline-block;margin-right:6px;box-shadow:0 0 8px #63d8bd}
+@keyframes zexShake{0%,100%{transform:translateX(0)}20%,60%{transform:translateX(-7px)}40%,80%{transform:translateX(7px)}}
+#zexGate .shake{animation:zexShake .4s}
