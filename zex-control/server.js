@@ -10,6 +10,7 @@ const { spawn } = require('child_process');
 
 const ROOT = __dirname;
 const PANEL = path.join(ROOT, '..', 'kangle.html');
+const ASSET_DIR = path.join(ROOT, '..', 'assets');
 const CONFIG_PATH = path.join(ROOT, 'config.json');
 const STATE_PATH = path.join(ROOT, 'data', 'state.json');
 const PROJECTS_PATH = path.join(ROOT, 'data', 'projects.json');
@@ -71,6 +72,10 @@ let state = {
   forceRotate: false,
   fallback: { active: false, reason: null, at: null },
   history: [],
+  apiRequests: 0,
+  startedAt: Date.now(),
+  settings: { name: 'ZEX PERSONAL PANEL', slug: 'zex' },
+  webhooks: [],
 };
 try { state = Object.assign(state, JSON.parse(fs.readFileSync(STATE_PATH, 'utf8'))); } catch (e) {}
 function normalizeState() {
@@ -83,6 +88,10 @@ function normalizeState() {
     }
     state.sessions[slot].ref = SLOT_REF[slot];
   }
+  state.apiRequests = Number(state.apiRequests || 0);
+  state.startedAt = state.startedAt || Date.now();
+  state.settings = Object.assign({ name: 'ZEX PERSONAL PANEL', slug: 'zex' }, state.settings || {});
+  state.webhooks = Array.isArray(state.webhooks) ? state.webhooks : [];
 }
 normalizeState();
 
@@ -186,8 +195,10 @@ async function bootstrap() {
     log('ZEX CLOUD control listening on http://' + HOST + ':' + PORT);
     log('Session A: ' + K.kernelA + ' | Session B: ' + K.kernelB);
     log('Quota-safe 12h handover; Render fallback ' + ((cfg.render.failoverServiceIds || []).length ? 'configured' : 'not configured'));
-    if (state.enabled) setTimeout(() => tick(true), 4000);
-    setInterval(() => tick(false), Math.max(60000, K.pollMs));
+    if (!process.env.ZEX_NO_TICK) {
+      if (state.enabled) setTimeout(() => tick(true), 4000);
+      setInterval(() => tick(false), Math.max(60000, K.pollMs));
+    }
     if (process.env.RENDER_EXTERNAL_URL) {
       const url = String(process.env.RENDER_EXTERNAL_URL).replace(/\/+$/, '') + '/api/health';
       const ping = () => fetch(url).catch(() => {});
@@ -212,7 +223,7 @@ function json(res, code, obj) {
 function readBody(req) {
   return new Promise((resolve) => {
     let out = '';
-    req.on('data', (d) => { out += d; if (out.length > 12 * 1024 * 1024) req.destroy(); });
+    req.on('data', (d) => { out += d; if (out.length > 25 * 1024 * 1024) req.destroy(); });
     req.on('end', () => { try { resolve(out ? JSON.parse(out) : {}); } catch (e) { resolve({}); } });
   });
 }
@@ -295,7 +306,11 @@ function bundleBase64() {
     projects: (reg.projects || []).map((p) => {
       const files = {};
       for (const [name, content] of Object.entries(p.files || {})) {
-        files[name] = Buffer.from(String(content), 'utf8').toString('base64');
+        if (content && typeof content === 'object' && typeof content.__zex_b64 === 'string') {
+          files[name] = content.__zex_b64;
+        } else {
+          files[name] = Buffer.from(String(content), 'utf8').toString('base64');
+        }
       }
       return Object.assign({}, p, { files });
     }),
@@ -468,6 +483,9 @@ function isSessionRunning(slot) {
 async function requestDeploy(reason) {
   state.deployPending = true;
   saveState();
+  if (process.env.ZEX_NO_DEPLOY) {
+    return { ok: true, queued: true, note: 'Deploy queued (test mode).' };
+  }
   const cur = state.active || 'a';
   if (!isSessionRunning(cur) && !state.handover) {
     const r = await startSession(cur, 60000, reason || 'deploy');
@@ -645,6 +663,12 @@ function publicStatus() {
     syncReason: state.syncReason,
     sessions,
     projects: { count: reg.projects.length, updated_at: reg.updated_at },
+    apiRequests: Number(state.apiRequests || 0),
+    startedAt: state.startedAt || null,
+    settings: state.settings || { name: 'ZEX PERSONAL PANEL', slug: 'zex' },
+    webhooks: (state.webhooks || []).length,
+    masterKeyMasked: masterKey().slice(0, 6) + '••••••••' + masterKey().slice(-4),
+    history: (state.history || []).slice(-40),
     rotation: { rotateAfterMs: K.rotateAfterMs, sessionMaxMs: K.sessionMaxMs, pollMs: K.pollMs },
     render: { fallbackServiceIds: cfg.render.failoverServiceIds || [], configured: (cfg.render.failoverServiceIds || []).length > 0 },
     fallback: state.fallback,
@@ -663,15 +687,191 @@ function publicStatus() {
   };
 }
 
-function validProject(p) {
+
+const KINDS = ['website', 'discord_bot', 'telegram_bot', 'api', 'worker'];
+const SITE_MIME = {
+  '.html': 'text/html; charset=utf-8', '.htm': 'text/html; charset=utf-8',
+  '.css': 'text/css; charset=utf-8', '.js': 'application/javascript; charset=utf-8',
+  '.mjs': 'application/javascript; charset=utf-8', '.json': 'application/json; charset=utf-8',
+  '.txt': 'text/plain; charset=utf-8', '.md': 'text/plain; charset=utf-8',
+  '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif', '.webp': 'image/webp', '.ico': 'image/x-icon', '.pdf': 'application/pdf',
+  '.wasm': 'application/wasm', '.mp4': 'video/mp4', '.webm': 'video/webm', '.mp3': 'audio/mpeg',
+  '.woff': 'font/woff', '.woff2': 'font/woff2', '.ttf': 'font/ttf', '.otf': 'font/otf',
+  '.xml': 'application/xml; charset=utf-8', '.map': 'application/json; charset=utf-8',
+  '.py': 'text/plain; charset=utf-8', '.sh': 'text/plain; charset=utf-8',
+};
+
+function slugify(value) {
+  return String(value || '').toLowerCase().trim()
+    .replace(/[^a-z0-9._-]+/g, '-').replace(/^[-._]+|[-._]+$/g, '').slice(0, 56);
+}
+function contentBuffer(content) {
+  if (content && typeof content === 'object') {
+    if (typeof content.__zex_b64 === 'string') return Buffer.from(content.__zex_b64, 'base64');
+    if (typeof content.data === 'string') return Buffer.from(content.data, content.encoding === 'base64' ? 'base64' : 'utf8');
+  }
+  return Buffer.from(String(content == null ? '' : content), 'utf8');
+}
+function contentText(content) { return contentBuffer(content).toString('utf8'); }
+function detectKind(p) {
+  if (KINDS.includes(p.kind)) return p.kind;
+  const cmd = String(p.start_command || '').toLowerCase();
+  if (cmd.includes('http.server') || cmd.includes('serve')) return 'website';
+  return 'worker';
+}
+function detectStartCommand(p) {
+  const explicit = String(p.start_command || '').trim();
+  if (explicit) return explicit;
+  if (p.kind === 'website') return '';
+  const files = p.files || {};
+  const names = Object.keys(files);
+  const find = (cands) => {
+    for (const c of cands) {
+      if (names.includes(c)) return c;
+      const hit = names.find((n) => n.endsWith('/' + c));
+      if (hit) return hit;
+    }
+    return null;
+  };
+  const pkg = find(['package.json']);
+  if (pkg) {
+    try {
+      const parsed = JSON.parse(contentText(files[pkg]));
+      if (parsed.scripts && parsed.scripts.start) return 'npm start';
+    } catch (e) {}
+  }
+  const pyPreferred = {
+    discord_bot: ['bot.py', 'main.py', 'app.py', 'index.py', 'run.py', 'server.py'],
+    telegram_bot: ['bot.py', 'main.py', 'app.py', 'index.py', 'run.py', 'server.py'],
+    api: ['app.py', 'main.py', 'server.py', 'index.py', 'run.py'],
+    worker: ['main.py', 'worker.py', 'app.py', 'run.py', 'index.py'],
+  }[p.kind] || ['main.py', 'app.py', 'bot.py', 'worker.py', 'run.py', 'index.py'];
+  const py = find(pyPreferred);
+  if (py) return 'python3 -u ' + py;
+  const nodePreferred = {
+    discord_bot: ['index.js', 'bot.js', 'main.js', 'server.js'],
+    telegram_bot: ['index.js', 'bot.js', 'main.js', 'server.js'],
+    api: ['server.js', 'index.js', 'app.js', 'main.js'],
+    worker: ['index.js', 'worker.js', 'main.js', 'server.js'],
+  }[p.kind] || ['index.js', 'server.js', 'app.js', 'main.js'];
+  const node = find(nodePreferred);
+  if (node) return 'node ' + node;
+  return '';
+}
+function normalizeProject(raw) {
+  const p = Object.assign({}, raw || {});
+  p.name = String(p.name || p.id || '').trim();
+  p.id = slugify(p.id || p.name);
+  p.kind = KINDS.includes(p.kind) ? p.kind : detectKind(p);
+  p.files = (p.files && typeof p.files === 'object' && !Array.isArray(p.files)) ? p.files : {};
+  p.env = (p.env && typeof p.env === 'object' && !Array.isArray(p.env)) ? p.env : {};
+  p.enabled = p.enabled !== false;
+  p.start_command = String(p.start_command || '').trim();
+  if (p.kind === 'website') p.start_command = '';
+  if (!p.start_command && p.kind !== 'website') p.start_command = detectStartCommand(p);
+  if (!p.requirements) {
+    const req = p.files['requirements.txt'] || p.files['./requirements.txt'];
+    if (req !== undefined) p.requirements = contentText(req).slice(0, 50000);
+  }
+  p.requirements = String(p.requirements || '');
+  p.public_url = p.kind === 'website' ? '/s/' + p.id + '/' : '';
+  return p;
+}
+function projectError(p) {
   if (!p || typeof p !== 'object') return 'project object required';
-  const id = String(p.id || '').trim();
-  if (!/^[a-z0-9][a-z0-9._-]{1,63}$/.test(id)) return 'invalid project id (lowercase slug)';
-  if (typeof p.start_command !== 'string') return 'start_command required';
-  if (p.files && typeof p.files !== 'object') return 'files must be an object';
-  if (p.env && typeof p.env !== 'object') return 'env must be an object';
+  if (!/^[a-z0-9][a-z0-9._-]{1,63}$/.test(String(p.id || ''))) return 'invalid project id (use a lowercase slug, 2-64 chars)';
+  if (!p.name) return 'project name required';
+  if (!KINDS.includes(p.kind)) return 'invalid project kind';
+  if (!p.files || typeof p.files !== 'object' || Array.isArray(p.files)) return 'files must be an object';
+  if (!p.env || typeof p.env !== 'object' || Array.isArray(p.env)) return 'env must be an object';
+  if (p.kind !== 'website' && !String(p.start_command || '').trim()) {
+    return 'Could not detect a start command. Upload package.json, main.py, app.py, bot.py or index.js (or add a start command).';
+  }
+  if (Buffer.byteLength(JSON.stringify(p.files)) > 20 * 1024 * 1024) return 'project files exceed the 20 MB limit';
   return null;
 }
+function masterKey() {
+  if (!state.masterKey) {
+    state.masterKey = crypto.randomBytes(24).toString('hex');
+    saveState();
+  }
+  return state.masterKey;
+}
+function apiPathForProject(p) {
+  return p.kind === 'website' ? '/s/' + p.id + '/' : '';
+}
+function siteNotFound(res) {
+  res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' });
+  return res.end('404 — site not found');
+}
+function serveSite(req, res, url) {
+  const m = String(url.pathname || '').match(/^\/s\/([a-z0-9][a-z0-9._-]{1,63})(?:\/(.*))?$/);
+  if (!m) return siteNotFound(res);
+  const id = m[1];
+  const reg = loadProjects();
+  const project = (reg.projects || []).find((x) => x.id === id);
+  if (!project || project.kind !== 'website' || project.enabled === false) return siteNotFound(res);
+  let rel = m[2] || '';
+  try { rel = decodeURIComponent(rel); } catch (e) { rel = ''; }
+  rel = rel.replace(/\\/g, '/').replace(/^\/+/, '');
+  let file = path.posix.normalize(rel || 'index.html');
+  if (file === '.' || file === '') file = 'index.html';
+  if (file.startsWith('..') || file.split('/').some((seg) => seg.startsWith('.'))) return siteNotFound(res);
+  const files = project.files || {};
+  let content = files[file];
+  if (content === undefined && !path.posix.extname(file)) {
+    if (files[file + '/index.html'] !== undefined) { file += '/index.html'; content = files[file]; }
+    else if (files[file + '.html'] !== undefined) { file += '.html'; content = files[file]; }
+  }
+  if (content === undefined && (!rel || rel.endsWith('/'))) {
+    const index = Object.keys(files).find((n) => /^index\.html?$/i.test(n));
+    if (index) { file = index; content = files[index]; }
+  }
+  if (content === undefined) {
+    const firstHtml = Object.keys(files).find((n) => /\.html?$/i.test(n));
+    if (firstHtml && (!rel || rel === 'index.html')) { file = firstHtml; content = files[firstHtml]; }
+  }
+  if (content === undefined) return siteNotFound(res);
+  const buf = contentBuffer(content);
+  const mime = SITE_MIME[path.posix.extname(file).toLowerCase()] || 'application/octet-stream';
+  const headers = {
+    'Content-Type': mime,
+    'Content-Length': buf.length,
+    'Cache-Control': 'public, max-age=60',
+    'X-Content-Type-Options': 'nosniff',
+    'Referrer-Policy': 'no-referrer',
+  };
+  res.writeHead(200, headers);
+  return res.end(req.method === 'HEAD' ? undefined : buf);
+}
+function serveAsset(req, res, url) {
+  const name = String(url.pathname || '').replace(/^\/assets\//, '');
+  if (!/^[A-Za-z0-9._-]+$/.test(name)) return json(res, 404, { ok: false, error: 'not found' });
+  const target = path.join(ASSET_DIR, name);
+  if (!target.startsWith(ASSET_DIR + path.sep)) return json(res, 404, { ok: false, error: 'not found' });
+  let buf;
+  try { buf = fs.readFileSync(target); } catch (e) { return json(res, 404, { ok: false, error: 'not found' }); }
+  const mime = SITE_MIME[path.extname(name).toLowerCase()] || 'application/octet-stream';
+  res.writeHead(200, { 'Content-Type': mime, 'Content-Length': buf.length, 'Cache-Control': 'public, max-age=300' });
+  return res.end(req.method === 'HEAD' ? undefined : buf);
+}
+function fireWebhooks(event, payload) {
+  const hooks = (state.webhooks || []).filter((w) => w && w.enabled !== false && (!w.event || w.event === event));
+  for (const w of hooks) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 6000);
+    fetch(w.url, {
+      method: 'POST', signal: ctrl.signal,
+      headers: { 'Content-Type': 'application/json', 'User-Agent': 'zex-cloud-panel' },
+      body: JSON.stringify({ event, at: new Date().toISOString(), data: payload }),
+    }).then((r) => log('WEBHOOK ' + event + ' -> ' + w.url + ' HTTP ' + r.status))
+      .catch((e) => log('WEBHOOK failed ' + event + ' -> ' + w.url + ': ' + e.message))
+      .finally(() => clearTimeout(timer));
+  }
+}
+
+
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://x');
@@ -682,6 +882,8 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       return res.end(html);
     }
+    if (p.startsWith('/assets/')) return serveAsset(req, res, url);
+    if (p === '/s' || p.startsWith('/s/')) return serveSite(req, res, url);
     if (p === '/api/login' && req.method === 'POST') {
       const b = await readBody(req);
       if (String(b.password || '') !== String(PANEL_PASSWORD)) {
@@ -701,25 +903,78 @@ const server = http.createServer(async (req, res) => {
     if (p === '/api/logs') {
       return json(res, 200, { ok: true, log: memLog.slice(-300) });
     }
+    if (p === '/api/backups') {
+      return json(res, 200, {
+        ok: true, lastBackup: state.lastBackup || null, lastSync: state.lastSync || null,
+        history: (state.history || []).slice(-40).reverse(),
+      });
+    }
+    if (p === '/api/key' && req.method === 'GET') {
+      return json(res, 200, { ok: true, key: masterKey() });
+    }
+    if (p === '/api/key' && req.method === 'POST') {
+      state.masterKey = crypto.randomBytes(24).toString('hex');
+      saveState();
+      log('MASTER key rotated');
+      return json(res, 200, { ok: true, key: state.masterKey });
+    }
+    if (p === '/api/settings' && req.method === 'GET') {
+      return json(res, 200, { ok: true, settings: state.settings || {} });
+    }
+    if (p === '/api/settings' && req.method === 'POST') {
+      const b = await readBody(req);
+      const next = Object.assign({}, state.settings || {});
+      if (b.name != null) next.name = String(b.name).trim().slice(0, 80) || 'ZEX PERSONAL PANEL';
+      if (b.slug != null) next.slug = slugify(b.slug) || 'zex';
+      if (b.reducedMotion != null) next.reducedMotion = !!b.reducedMotion;
+      if (b.compact != null) next.compact = !!b.compact;
+      state.settings = next;
+      saveState();
+      log('SETTINGS updated');
+      return json(res, 200, { ok: true, settings: next });
+    }
+    if (p === '/api/webhooks' && req.method === 'GET') {
+      return json(res, 200, { ok: true, webhooks: state.webhooks || [] });
+    }
+    if (p === '/api/webhooks' && req.method === 'POST') {
+      const b = await readBody(req);
+      const w = b.webhook || {};
+      const url = String(w.url || '').trim();
+      if (!/^https?:\/\/[^\s]+$/i.test(url)) return json(res, 400, { ok: false, error: 'valid http(s) webhook URL required' });
+      const hook = {
+        id: slugify(w.id || '') || ('wh-' + crypto.randomBytes(3).toString('hex')),
+        event: String(w.event || 'project.saved').trim().slice(0, 60),
+        url,
+        enabled: w.enabled !== false,
+      };
+      state.webhooks = (state.webhooks || []).filter((x) => x.id !== hook.id);
+      state.webhooks.push(hook);
+      saveState();
+      log('WEBHOOK saved: ' + hook.id);
+      return json(res, 200, { ok: true, webhook: hook, webhooks: state.webhooks });
+    }
+    if (p === '/api/webhooks' && req.method === 'DELETE') {
+      const id = url.searchParams.get('id');
+      state.webhooks = (state.webhooks || []).filter((x) => x.id !== id);
+      saveState();
+      return json(res, 200, { ok: true, webhooks: state.webhooks });
+    }
     if (p === '/api/projects' && req.method === 'GET') {
       return json(res, 200, Object.assign({ ok: true }, loadProjects()));
     }
     if (p === '/api/projects' && req.method === 'POST') {
       const b = await readBody(req);
-      const err = validProject(b.project);
+      const project = normalizeProject(b.project);
+      const err = projectError(project);
       if (err) return json(res, 400, { ok: false, error: err });
       const reg = loadProjects();
-      const project = Object.assign({}, b.project);
-      project.files = project.files || {};
-      project.env = project.env || {};
-      project.requirements = project.requirements || '';
-      project.enabled = project.enabled !== false;
       const idx = reg.projects.findIndex((x) => x.id === project.id);
       if (idx >= 0) reg.projects[idx] = project; else reg.projects.push(project);
       saveProjects(reg);
-      log('PROJECT saved: ' + project.id);
+      log('PROJECT saved: ' + project.id + ' kind=' + project.kind + ' cmd=' + (project.start_command || '—'));
+      fireWebhooks('project.saved', { id: project.id, kind: project.kind, name: project.name });
       const dep = await requestDeploy('project-save');
-      return json(res, 200, { ok: true, project, deploy: dep });
+      return json(res, 200, { ok: true, project, public_url: apiPathForProject(project), deploy: dep });
     }
     if (p === '/api/projects' && req.method === 'DELETE') {
       const id = url.searchParams.get('id');
@@ -729,6 +984,7 @@ const server = http.createServer(async (req, res) => {
       reg.projects = reg.projects.filter((x) => x.id !== id);
       saveProjects(reg);
       log('PROJECT deleted: ' + id + ' (' + (before - reg.projects.length) + ')');
+      fireWebhooks('project.deleted', { id, removed: before - reg.projects.length });
       const dep = await requestDeploy('project-delete');
       return json(res, 200, { ok: true, removed: before - reg.projects.length, deploy: dep });
     }
@@ -802,12 +1058,25 @@ const server = http.createServer(async (req, res) => {
 });
 
 function auth(req) {
+  let ok = false;
   const h = req.headers.authorization || '';
   const m = h.match(/^Bearer (.+)$/);
-  if (!m) return false;
-  const exp = tokens.get(m[1]);
-  if (!exp || exp < Date.now()) { tokens.delete(m[1]); return false; }
-  return true;
+  if (m) {
+    const exp = tokens.get(m[1]);
+    if (exp && exp >= Date.now()) ok = true;
+    else tokens.delete(m[1]);
+  }
+  const supplied = String(req.headers['x-api-key'] || '');
+  if (!ok && supplied) {
+    const a = crypto.createHash('sha256').update(supplied).digest();
+    const b = crypto.createHash('sha256').update(masterKey()).digest();
+    if (crypto.timingSafeEqual(a, b)) ok = true;
+  }
+  if (ok && String(req.url || '').startsWith('/api/')) {
+    state.apiRequests = Number(state.apiRequests || 0) + 1;
+    if (state.apiRequests % 25 === 0) saveState();
+  }
+  return ok;
 }
 
 bootstrap();
