@@ -1,6 +1,7 @@
 {
-  "port": 3000,
+  "password": "zex2026",
   "host": "0.0.0.0",
+  "port": 3000,
   "autoStart": true,
   "kaggle": {
     "username": "hostinghbi83838",
@@ -12,11 +13,12 @@
     "minPushGapMs": 900000
   },
   "render": {
-    "failoverServiceIds": []
+    "ownerId": "tea-daadbs2jnfac7387m590",
+    "repo": "https://github.com/sujalkumar48065-star/zex-hosting2x-h2",
+    "branch": "main",
+    "rootDir": "vip",
+    "failoverServiceIds": [],
+    "failoverAfterFailures": 2
   },
-  "rotateAfterMs": 39600000,
-  "sessionMaxMs": 43200000,
-  "pollMs": 300000,
-  "minPushGapMs": 900000,
-  "failoverAfterFailures": 2
+  "runtimeMode": "render"
 }
