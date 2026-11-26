@@ -274,6 +274,9 @@ def _start_projects(projects):
     for project in projects:
         if not project.get("enabled", True):
             continue
+        if project.get("run_in_kaggle") is False:
+            print("[zex] project {} is set to Render runtime; skipping in Kaggle".format(project.get("id")), flush=True)
+            continue
         threading.Thread(target=_run_project, args=(project,), daemon=True).start()
 
 
