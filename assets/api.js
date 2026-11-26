@@ -14,7 +14,7 @@ async function zexApi(p,method='GET',body){
 }
 function rtTime(ts){if(!ts)return '—';const s=Math.max(0,Math.floor((Date.now()-ts)/1000));const h=Math.floor(s/3600),m=Math.floor((s%3600)/60);return (h?h+'h ':'')+m+'m'}
 const zpEsc=s=>String(s==null?'':s).replace(/[<>&"]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));
-let zexProjectsMap={};
+let zexProjectsMap={};let overviewRetries=0;let projectsRetries=0;
 
 function siteUrl(p){return p&&p.kind==='website'?(location.origin+(p.public_url||('/s/'+p.id+'/'))):''}
 function fileTextName(name){return /\.(html?|css|js|mjs|cjs|json|py|txt|md|markdown|ya?ml|toml|ini|cfg|conf|env|sh|bash|jsx|tsx?|vue|svelte|sql|xml|svg|csv|log)$/i.test(String(name||''))}
@@ -66,7 +66,7 @@ function fillSessionStats(s){
 async function loadProjects(){
   try{
     const [d,s]=await Promise.all([zexApi('/api/projects'),zexApi('/api/status')]);
-    liveProjects=d.projects||[];panelStatus=s;
+    liveProjects=d.projects||[];panelStatus=s;projectsRetries=0;
     zexProjectsMap={};liveProjects.forEach(p=>zexProjectsMap[p.id]=p);
     const el=document.getElementById('zexProjects');
     if(el)el.innerHTML=liveProjects.map(p=>`<div class="switch"><div><b>${zpEsc(p.name||p.id)}</b><div class="key-note" style="margin:4px 0 0">${zpEsc(kindLabel(p.kind))} · ${zpEsc(p.id)} · ${p.kind==='website'?(p.public_url||('/s/'+p.id+'/')):zpEsc(p.start_command||'auto-detect')} · ${Object.keys(p.files||{}).length} file(s)</div></div><div style="display:flex;gap:6px">${btn('Edit','zex-edit:'+p.id,'btn ghost')}${btn('Delete','zex-del:'+p.id,'btn ghost')}</div></div>`).join('')||'<div class="empty">No projects yet. Create your first project.</div>';
@@ -75,9 +75,9 @@ async function loadProjects(){
     if(info&&s){const sa=(s.sessions&&s.sessions.a)||{};const sb=(s.sessions&&s.sessions.b)||{};info.textContent='Kaggle backup · A v'+(sa.version||'—')+' ('+(sa.status||'—')+') · B v'+(sb.version||'—')+' ('+(sb.status||'—')+') · last backup '+(s.lastBackup?new Date(s.lastBackup).toLocaleString():'—')}
     fillSessionStats(s);
     fillFileSelect();
-  }catch(e){const el=document.getElementById('zexProjects');if(el)el.innerHTML='<div style="color:var(--amber)">'+zpEsc(e.message)+'</div>';const info=document.getElementById('projectsKaggleInfo');if(info)info.textContent='Backend: '+e.message}
+  }catch(e){const el=document.getElementById('zexProjects');if(el)el.innerHTML='<div style="color:var(--amber)">'+zpEsc(e.message)+'</div>';const info=document.getElementById('projectsKaggleInfo');if(info)info.textContent='Backend: '+e.message;if(projectsRetries<5){projectsRetries++;setTimeout(()=>{if(current==='projects'||current==='overview')loadProjects()},4000)}}
 }
-async function loadOverview(){try{const s=await zexApi('/api/status');panelStatus=s;try{const k=await zexApi('/api/key');masterKeyValue=k.key||''}catch(e){}fillSessionStats(s);refreshSidebar(s);await loadProjects();fillSessionStats(s);refreshSidebar(s)}catch(e){toast('Backend: '+e.message)}}
+async function loadOverview(){try{const s=await zexApi('/api/status');panelStatus=s;overviewRetries=0;try{const k=await zexApi('/api/key');masterKeyValue=k.key||''}catch(e){}fillSessionStats(s);refreshSidebar(s);await loadProjects();fillSessionStats(s);refreshSidebar(s)}catch(e){const st=document.getElementById('platformStatusText');if(st)st.textContent='Backend wake-up · retrying…';if(overviewRetries<5){overviewRetries++;setTimeout(()=>{if(current==='overview')loadOverview()},4000)}else toast('Backend: '+e.message)}}
 
 async function loadConsole(){
   const el=document.getElementById('consoleLogs');if(!el)return;
