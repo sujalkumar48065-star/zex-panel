@@ -36,6 +36,11 @@ function applySettings(settings){
   if(tag&&settings.name)tag.textContent=String(settings.name).split(' ').slice(1).join(' ')||'PERSONAL PANEL';
   document.documentElement.style.scrollBehavior=settings.reducedMotion?'auto':'';
   if(document.body)document.body.dataset.compact=settings.compact?'1':'';
+  const css=[];
+  if(settings.reducedMotion)css.push('*{animation:none!important;transition:none!important;scroll-behavior:auto!important}');
+  if(settings.compact)css.push('@media(min-width:900px){.content{padding:18px 22px 34px}.page-head{margin-bottom:16px}}');
+  let st=document.getElementById('zexPrefsStyle');if(!st){st=document.createElement('style');st.id='zexPrefsStyle';document.head.appendChild(st)}
+  st.textContent=css.join('\n');
 }
 function statById(id,v){const e=document.getElementById(id);if(e)e.textContent=v}
 function fillActivity(s){
@@ -140,9 +145,9 @@ async function loadApi(){
     const mk=document.getElementById('apiMasterKey');if(mk)mk.textContent=masterVisible?(masterKeyValue||'server-side'):'••••••••••••••••';
     const q=document.getElementById('apiQuickStart');if(q)q.textContent='curl -s '+location.origin+'/api/status -H "X-API-Key: '+(masterVisible?masterKeyValue:'YOUR_KEY')+'"';
     const sess=s.sessions||{};const conn=[
-      {name:'Kaggle sessions',extra:'A: '+((sess.a&&sess.a.status)||'—')+' · B: '+((sess.b&&sess.b.status)||'—'),value:'configured server-side'},
-      {name:'Render hosting',extra:'panel: '+(s.render&&s.render.configured?'fallback configured':'live (no fallback)'),value:'configured server-side'},
-      {name:'GitHub state',extra:'projects + state persistence',value:'configured server-side'}
+      {name:'Kaggle sessions',extra:'A: '+((sess.a&&sess.a.status)||'—')+' · B: '+((sess.b&&sess.b.status)||'—'),value:s.kaggle?'configured server-side':'missing credentials'},
+      {name:'Render hosting',extra:'panel: '+(s.render&&s.render.configured?'fallback configured':'live (no fallback)'),value:s.renderKey?'configured server-side':'missing key'},
+      {name:'GitHub state',extra:'projects + state persistence',value:s.github?'connected (private repo)':'not configured'}
     ];
     const c=document.getElementById('apiConnections');if(c)c.innerHTML=conn.map((x,i)=>`<div style="display:flex;gap:10px;align-items:center;padding:12px 0;border-bottom:1px solid var(--line)"><div style="flex:1;min-width:0"><b style="font:700 13px Manrope">${zpEsc(x.name)}</b><div style="margin-top:4px;font-size:11px;color:var(--dim)">${zpEsc(x.extra)}</div><code style="display:block;margin-top:6px;font-family:'DM Mono',monospace;font-size:12px;word-break:break-all;color:var(--muted)">${zpEsc(x.value)}</code></div></div>`).join('');
     fillSessionStats(s);
