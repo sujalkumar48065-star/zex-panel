@@ -818,7 +818,7 @@ function runtimeEntry(id) {
     r = {
       id, status: 'stopped', proc: null, logs: [], restarts: 0,
       startedAt: null, lastExit: null, error: null, stopRequested: false,
-      starting: false, timer: null, installing: false,
+      starting: false, timer: null, installing: false, cancelled: false,
     };
     runtime.set(id, r);
   }
@@ -938,6 +938,7 @@ async function startProject(id, opts) {
   if (project.enabled === false) { r.status = 'stopped'; return { ok: false, error: 'project disabled' }; }
   if (!opts.force && r.proc && r.status === 'running') return { ok: true, alreadyRunning: true, pid: r.proc.pid };
   if (r.starting) return { ok: false, error: 'start already in progress' };
+  r.cancelled = false;
   r.starting = true;
   try {
     if (r.proc) await stopProject(id, true);
@@ -957,6 +958,12 @@ async function startProject(id, opts) {
       r.status = 'error'; r.error = 'Dependency install failed';
       runtimeLog(r, r.error);
       return { ok: false, error: r.error };
+    }
+    const still = (loadProjects().projects || []).find((x) => x.id === id);
+    if (!still || r.cancelled) {
+      r.status = 'stopped';
+      runtimeLog(r, 'start cancelled (project removed)');
+      return { ok: false, error: 'project removed' };
     }
     const env = Object.assign({}, process.env, project.env || {}, {
       PYTHONUNBUFFERED: '1', NODE_ENV: 'production', ZEX_PROJECT_ID: project.id,
@@ -1014,16 +1021,22 @@ function setProjectAutoStart(id, value) {
   saveProjects(reg);
   return true;
 }
+function processMemoryMb(pid) {
+  try {
+    const statm = fs.readFileSync('/proc/' + pid + '/statm', 'utf8').trim().split(/\s+/);
+    return Math.round(Number(statm[1] || 0) * 4096 / 1048576 * 10) / 10;
+  } catch (e) { return null; }
+}
 function runtimeStatus() {
   const reg = loadProjects();
   for (const p of reg.projects || []) {
     if (p.kind !== 'website' && !runtime.has(p.id)) runtimeEntry(p.id);
   }
-  return [...runtime.values()].filter((r) => (reg.projects || []).some((x) => x.id === r.id)).map((r) => {
+  return [...runtime.values()].filter((r) => (reg.projects || []).some((x) => x.id === r.id && x.kind !== 'website')).map((r) => {
     const p = (reg.projects || []).find((x) => x.id === r.id) || {};
     return {
       id: r.id, name: p.name || r.id, kind: p.kind || 'worker',
-      status: r.status, pid: r.proc ? r.proc.pid : null,
+      status: r.status, pid: r.proc ? r.proc.pid : null, memoryMb: r.proc ? processMemoryMb(r.proc.pid) : null,
       startedAt: r.startedAt, uptimeMs: r.startedAt && r.status === 'running' ? Date.now() - r.startedAt : 0,
       restarts: r.restarts, error: r.error, lastExit: r.lastExit,
       autoStart: p.auto_start !== false, installing: r.installing,
@@ -1288,6 +1301,9 @@ const server = http.createServer(async (req, res) => {
       saveProjects(reg);
       log('PROJECT deleted: ' + id + ' (' + (before - reg.projects.length) + ')');
       if (RUNTIME_MODE === 'render' && !process.env.ZEX_NO_RUNTIME) {
+        const rr = runtimeEntry(id);
+        rr.cancelled = true;
+        rr.stopRequested = true;
         stopProject(id, true).then(() => { runtime.delete(id); try { fs.rmSync(path.join(RUNTIME_DIR, id), { recursive: true, force: true }); } catch (e) {} });
       }
       fireWebhooks('project.deleted', { id, removed: before - reg.projects.length });
