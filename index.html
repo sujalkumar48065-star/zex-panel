@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#f4f8ff">
+<meta name="description" content="ZEX Cloud — simple hosting for websites, Telegram bots, Discord bots, APIs and workers.">
+<title>ZEX Cloud · Hosting panel</title>
+<link rel="stylesheet" href="assets/portal.css?v=20261126e">
+</head>
+<body class="landing">
+<div class="land-wrap">
+  <header class="land-nav">
+    <a class="land-brand" href="index.html"><span class="mark">✦</span><span><b>ZEX</b><small>CLOUD PANEL</small></span></a>
+    <nav><a href="#features">Features</a><a href="login.html">Login</a><a class="btn primary" href="dashboard.html">Open dashboard</a></nav>
+  </header>
+  <main class="land-hero">
+    <div class="land-copy">
+      <span class="eyebrow">SIMPLE HOSTING · REAL RUNTIME</span>
+      <h1>Website ho ya bot,<br><em>sab yahin chalega.</em></h1>
+      <p>Ek clean panel me project banayein, files upload karein, token daalein, aur Start dabayein. ZEX logs, status, auto-restart aur backup khud sambhalega.</p>
+      <div class="land-actions"><a class="btn primary" href="dashboard.html">Open dashboard</a><a class="btn" href="login.html">Login</a><a class="btn ghost" href="admin.html">Admin</a></div>
+      <div class="land-points"><span>✦ Live start / stop</span><span>⌁ Auto-restart</span><span>◈ Real API token</span></div>
+    </div>
+    <div class="land-art" aria-hidden="true">
+      <div class="art-card"><div class="art-top"><span class="dot"></span><span>Live runtime</span><b>ON</b></div><div class="art-row"><span class="art-ico">➤</span><div><b>Telegram bot</b><small>running · 2h 14m</small></div><span class="art-pill">Running</span></div><div class="art-row"><span class="art-ico">◈</span><div><b>My website</b><small>public link ready</small></div><span class="art-pill">Static</span></div><div class="art-row"><span class="art-ico">⌘</span><div><b>API worker</b><small>auto-restart ON</small></div><span class="art-pill">Running</span></div><div class="art-foot">Logs · Errors · Restart · Backup</div></div>
+    </div>
+  </main>
+  <section id="features" class="land-features">
+    <article><span>◈</span><h3>Websites</h3><p>HTML/CSS/JS upload karein, public link turant milta hai.</p></article>
+    <article><span>➤</span><h3>Telegram bots</h3><p>BotFather token paste karein, bot Render par live chalega.</p></article>
+    <article><span>◉</span><h3>Discord bots</h3><p>Developer Portal token daalein, auto-restart ke saath.</p></article>
+    <article><span>⌁</span><h3>Workers & APIs</h3><p>Background process, logs, start/stop/restart — sab panel se.</p></article>
+  </section>
+  <footer class="land-foot"><span>ZEX Cloud Panel</span><span id="landStatus"><i class="dot"></i> checking server…</span></footer>
+</div>
+<script>
+fetch('/api/health').then(r=>r.json()).then(d=>{var e=document.getElementById('landStatus');if(e)e.innerHTML='<i class="dot"></i> server online'}).catch(()=>{var e=document.getElementById('landStatus');if(e)e.innerHTML='<i class="dot off"></i> server offline'});
+</script>
+</body></html>
