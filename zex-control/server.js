@@ -10,6 +10,14 @@ const { spawn } = require('child_process');
 
 const ROOT = __dirname;
 const PANEL = path.join(ROOT, '..', 'kangle.html');
+const PAGE_DIR = path.join(ROOT, '..');
+const PAGES = {
+  '/': 'index.html',
+  '/index.html': 'index.html',
+  '/login.html': 'login.html',
+  '/dashboard.html': 'dashboard.html',
+  '/admin.html': 'admin.html',
+};
 const ASSET_DIR = path.join(ROOT, '..', 'assets');
 const CONFIG_PATH = path.join(ROOT, 'config.json');
 const STATE_PATH = path.join(ROOT, 'data', 'state.json');
@@ -33,6 +41,9 @@ if (process.env.ZEX_KAGGLE_USER && process.env.ZEX_KAGGLE_KEY) {
 } else {
   try { KAGGLE_CREDS = JSON.parse(readSecret('kaggle.json') || '{}'); } catch (e) {}
 }
+const RUNTIME_DIR = path.join(ROOT, 'data', 'runtime');
+const RUNTIME_MODE = String(process.env.ZEX_RUNTIME_MODE || cfg.runtimeMode || 'render').toLowerCase();
+const runtime = new Map();
 const PANEL_PASSWORD = process.env.ZEX_PANEL_PASSWORD || cfg.password;
 const PORT = Number(process.env.PORT || cfg.port);
 const HOST = process.env.HOST || cfg.host || '0.0.0.0';
@@ -41,10 +52,12 @@ const GH_REPO = process.env.GITHUB_STATE_REPO || '';
 const GH_BRANCH = process.env.GITHUB_STATE_BRANCH || 'main';
 const GH_ENABLED = !!(GH_TOKEN && GH_REPO);
 
+
 fs.mkdirSync(path.join(ROOT, 'logs'), { recursive: true });
 fs.mkdirSync(path.join(ROOT, 'data'), { recursive: true });
 fs.mkdirSync(path.join(ROOT, 'data', 'zex-cloud-a'), { recursive: true });
 fs.mkdirSync(path.join(ROOT, 'data', 'zex-cloud-b'), { recursive: true });
+fs.mkdirSync(RUNTIME_DIR, { recursive: true });
 
 const SLOTS = ['a', 'b'];
 const SLOT_REF = { a: K.kernelA, b: K.kernelB };
@@ -206,6 +219,7 @@ async function bootstrap() {
       setInterval(ping, 4 * 60 * 1000);
       log('Self-ping enabled');
     }
+    setTimeout(startAutoRuntime, 2500);
   });
 }
 function log(msg) {
@@ -312,7 +326,7 @@ function bundleBase64() {
           files[name] = Buffer.from(String(content), 'utf8').toString('base64');
         }
       }
-      return Object.assign({}, p, { files });
+      return Object.assign({}, p, { files, run_in_kaggle: RUNTIME_MODE !== 'render' });
     }),
   };
   const raw = Buffer.from(JSON.stringify(bundle), 'utf8');
@@ -663,6 +677,8 @@ function publicStatus() {
     syncReason: state.syncReason,
     sessions,
     projects: { count: reg.projects.length, updated_at: reg.updated_at },
+    runtimeMode: RUNTIME_MODE,
+    runtime: RUNTIME_MODE === 'render' ? runtimeStatus() : [],
     apiRequests: Number(state.apiRequests || 0),
     startedAt: state.startedAt || null,
     settings: state.settings || { name: 'ZEX PERSONAL PANEL', slug: 'zex' },
@@ -748,7 +764,7 @@ function detectStartCommand(p) {
     discord_bot: ['bot.py', 'main.py', 'app.py', 'index.py', 'run.py', 'server.py'],
     telegram_bot: ['bot.py', 'main.py', 'app.py', 'index.py', 'run.py', 'server.py'],
     api: ['app.py', 'main.py', 'server.py', 'index.py', 'run.py'],
-    worker: ['main.py', 'worker.py', 'app.py', 'run.py', 'index.py'],
+    worker: ['bot.py', 'main.py', 'worker.py', 'app.py', 'run.py', 'index.py'],
   }[p.kind] || ['main.py', 'app.py', 'bot.py', 'worker.py', 'run.py', 'index.py'];
   const py = find(pyPreferred);
   if (py) return 'python3 -u ' + py;
@@ -770,6 +786,7 @@ function normalizeProject(raw) {
   p.files = (p.files && typeof p.files === 'object' && !Array.isArray(p.files)) ? p.files : {};
   p.env = (p.env && typeof p.env === 'object' && !Array.isArray(p.env)) ? p.env : {};
   p.enabled = p.enabled !== false;
+  p.auto_start = p.auto_start !== false;
   p.start_command = String(p.start_command || '').trim();
   if (p.kind === 'website') p.start_command = '';
   if (!p.start_command && p.kind !== 'website') p.start_command = detectStartCommand(p);
@@ -794,6 +811,243 @@ function projectError(p) {
   if (Buffer.byteLength(JSON.stringify(p.files)) > 20 * 1024 * 1024) return 'project files exceed the 20 MB limit';
   return null;
 }
+
+function runtimeEntry(id) {
+  let r = runtime.get(id);
+  if (!r) {
+    r = {
+      id, status: 'stopped', proc: null, logs: [], restarts: 0,
+      startedAt: null, lastExit: null, error: null, stopRequested: false,
+      starting: false, timer: null, installing: false,
+    };
+    runtime.set(id, r);
+  }
+  return r;
+}
+function runtimeLog(r, line) {
+  const text = String(line == null ? '' : line).replace(/\r$/, '');
+  if (!text.trim()) return;
+  r.logs.push('[' + new Date().toISOString() + '] ' + text);
+  if (r.logs.length > 600) r.logs.shift();
+}
+function safeRuntimePath(base, rel) {
+  const clean = String(rel || '').replace(/\\/g, '/').replace(/^\/+/, '');
+  const parts = clean.split('/').filter((x) => x && x !== '.' && x !== '..');
+  return path.join(base, ...parts);
+}
+function syncRuntimeFiles(project, resetDeps) {
+  const dir = path.join(RUNTIME_DIR, project.id);
+  fs.mkdirSync(dir, { recursive: true });
+  for (const [rel, content] of Object.entries(project.files || {})) {
+    const target = safeRuntimePath(dir, rel);
+    if (!target.startsWith(dir + path.sep)) continue;
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, contentBuffer(content));
+  }
+  if (resetDeps) {
+    try { fs.rmSync(path.join(dir, '.zex-deps-ready'), { force: true }); } catch (e) {}
+  }
+  return dir;
+}
+function runCaptured(command, args, cwd, r, timeoutMs) {
+  return new Promise((resolve) => {
+    let done = false;
+    let child;
+    try {
+      child = spawn(command, args, { cwd, env: Object.assign({}, process.env, { PYTHONUNBUFFERED: '1' }), stdio: ['ignore', 'pipe', 'pipe'] });
+    } catch (e) {
+      runtimeLog(r, '[install] ' + e.message);
+      return resolve(false);
+    }
+    const timer = setTimeout(() => {
+      try { child.kill('SIGKILL'); } catch (e) {}
+      if (!done) { done = true; runtimeLog(r, '[install] timeout'); resolve(false); }
+    }, timeoutMs || 300000);
+    const onData = (buf) => {
+      String(buf).split(/\r?\n/).filter(Boolean).forEach((l) => runtimeLog(r, '[install] ' + l));
+    };
+    child.stdout.on('data', onData);
+    child.stderr.on('data', onData);
+    child.on('error', (e) => {
+      clearTimeout(timer);
+      if (!done) { done = true; runtimeLog(r, '[install] ' + e.message); resolve(false); }
+    });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      if (!done) { done = true; resolve(code === 0); }
+    });
+  });
+}
+async function installRuntimeDeps(project, dir, r) {
+  const marker = path.join(dir, '.zex-deps-ready');
+  if (fs.existsSync(marker)) return true;
+  const req = path.join(dir, 'requirements.txt');
+  const pkg = path.join(dir, 'package.json');
+  if (!fs.existsSync(req) && !fs.existsSync(pkg)) {
+    try { fs.writeFileSync(marker, 'no dependencies\n'); } catch (e) {}
+    return true;
+  }
+  r.installing = true;
+  r.status = 'installing';
+  runtimeLog(r, 'installing dependencies…');
+  let ok = true;
+  if (fs.existsSync(req)) {
+    const pip = await runCaptured('python3', ['-m', 'pip', 'install', '--quiet', '--disable-pip-version-check', '--break-system-packages', '-r', 'requirements.txt'], dir, r, 300000);
+    if (!pip) { ok = false; runtimeLog(r, 'pip install failed'); }
+  }
+  if (fs.existsSync(pkg) && !fs.existsSync(path.join(dir, 'node_modules'))) {
+    const npm = await runCaptured('npm', ['install', '--omit=dev', '--no-audit', '--no-fund'], dir, r, 300000);
+    if (!npm) { ok = false; runtimeLog(r, 'npm install failed'); }
+  }
+  r.installing = false;
+  if (ok) { try { fs.writeFileSync(marker, 'done\n'); } catch (e) {} }
+  return ok;
+}
+function stopProject(id, silent) {
+  const r = runtimeEntry(id);
+  r.stopRequested = true;
+  if (r.timer) { clearTimeout(r.timer); r.timer = null; }
+  const child = r.proc;
+  if (!child) { r.status = 'stopped'; r.proc = null; return Promise.resolve(); }
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      r.proc = null;
+      r.status = 'stopped';
+      if (!silent) runtimeLog(r, 'stopped');
+      resolve();
+    };
+    child.once('exit', finish);
+    try { process.kill(-child.pid, 'SIGTERM'); } catch (e) { try { child.kill('SIGTERM'); } catch (e2) {} }
+    setTimeout(() => { try { process.kill(-child.pid, 'SIGKILL'); } catch (e) { try { child.kill('SIGKILL'); } catch (e2) {} } }, 4000);
+    setTimeout(finish, 7000);
+  });
+}
+async function startProject(id, opts) {
+  opts = opts || {};
+  const project = (loadProjects().projects || []).find((x) => x.id === id);
+  const r = runtimeEntry(id);
+  if (!project) { r.status = 'error'; r.error = 'project not found'; return { ok: false, error: r.error }; }
+  if (project.kind === 'website') {
+    r.status = 'static';
+    r.error = null;
+    return { ok: true, static: true };
+  }
+  if (project.enabled === false) { r.status = 'stopped'; return { ok: false, error: 'project disabled' }; }
+  if (!opts.force && r.proc && r.status === 'running') return { ok: true, alreadyRunning: true, pid: r.proc.pid };
+  if (r.starting) return { ok: false, error: 'start already in progress' };
+  r.starting = true;
+  try {
+    if (r.proc) await stopProject(id, true);
+    if (!project.start_command) project.start_command = detectStartCommand(project);
+    if (!project.start_command) {
+      r.status = 'error'; r.error = 'No start command could be detected';
+      runtimeLog(r, r.error);
+      return { ok: false, error: r.error };
+    }
+    r.stopRequested = false;
+    r.error = null;
+    r.lastExit = null;
+    if (!opts.restart) r.restarts = 0;
+    const dir = syncRuntimeFiles(project, false);
+    const deps = await installRuntimeDeps(project, dir, r);
+    if (!deps) {
+      r.status = 'error'; r.error = 'Dependency install failed';
+      runtimeLog(r, r.error);
+      return { ok: false, error: r.error };
+    }
+    const env = Object.assign({}, process.env, project.env || {}, {
+      PYTHONUNBUFFERED: '1', NODE_ENV: 'production', ZEX_PROJECT_ID: project.id,
+      PORT: String((project.env && project.env.PORT) || (4100 + runtime.size)),
+    });
+    const child = spawn(project.start_command, { shell: true, cwd: dir, env, detached: true });
+    r.proc = child;
+    r.status = 'running';
+    r.startedAt = Date.now();
+    r.error = null;
+    runtimeLog(r, 'started pid=' + child.pid + ' · ' + project.start_command);
+    const onData = (buf) => String(buf).split(/\r?\n/).forEach((l) => runtimeLog(r, l));
+    child.stdout.on('data', onData);
+    child.stderr.on('data', onData);
+    child.on('error', (e) => { runtimeLog(r, 'process error: ' + e.message); r.error = e.message; });
+    child.on('exit', (code, signal) => {
+      if (r.proc !== child) return;
+      r.proc = null;
+      r.lastExit = { code, signal, at: Date.now() };
+      if (r.stopRequested) { r.status = 'stopped'; return; }
+      const current = (loadProjects().projects || []).find((x) => x.id === id);
+      if (!current || current.enabled === false || current.auto_start === false) { r.status = 'stopped'; return; }
+      r.restarts++;
+      if (r.restarts <= 5) {
+        r.status = 'restarting';
+        r.error = 'Exited with code ' + code + '; restarting';
+        runtimeLog(r, r.error);
+        r.timer = setTimeout(() => { startProject(id, { auto: true, restart: true }); }, Math.min(30000, 3000 * r.restarts));
+      } else {
+        r.status = 'error';
+        r.error = 'Crashed repeatedly (last code ' + code + ')';
+        runtimeLog(r, r.error);
+      }
+    });
+    return { ok: true, pid: child.pid };
+  } catch (e) {
+    r.status = 'error'; r.error = e.message; runtimeLog(r, 'start failed: ' + e.message);
+    return { ok: false, error: e.message };
+  } finally {
+    r.starting = false;
+  }
+}
+async function restartProject(id) {
+  await stopProject(id, true);
+  const reg = loadProjects();
+  const p = (reg.projects || []).find((x) => x.id === id);
+  if (p) { p.auto_start = true; saveProjects(reg); }
+  return startProject(id, { manual: true });
+}
+function setProjectAutoStart(id, value) {
+  const reg = loadProjects();
+  const p = (reg.projects || []).find((x) => x.id === id);
+  if (!p) return false;
+  p.auto_start = !!value;
+  saveProjects(reg);
+  return true;
+}
+function runtimeStatus() {
+  const reg = loadProjects();
+  for (const p of reg.projects || []) {
+    if (p.kind !== 'website' && !runtime.has(p.id)) runtimeEntry(p.id);
+  }
+  return [...runtime.values()].filter((r) => (reg.projects || []).some((x) => x.id === r.id)).map((r) => {
+    const p = (reg.projects || []).find((x) => x.id === r.id) || {};
+    return {
+      id: r.id, name: p.name || r.id, kind: p.kind || 'worker',
+      status: r.status, pid: r.proc ? r.proc.pid : null,
+      startedAt: r.startedAt, uptimeMs: r.startedAt && r.status === 'running' ? Date.now() - r.startedAt : 0,
+      restarts: r.restarts, error: r.error, lastExit: r.lastExit,
+      autoStart: p.auto_start !== false, installing: r.installing,
+      command: p.start_command || '', public_url: p.public_url || '',
+      logs: r.logs.slice(-30),
+    };
+  });
+}
+function runtimeLogs(id) {
+  const r = runtime.get(id);
+  return r ? r.logs.slice(-400) : [];
+}
+function startAutoRuntime() {
+  if (RUNTIME_MODE !== 'render' || process.env.ZEX_NO_RUNTIME) return;
+  const reg = loadProjects();
+  (reg.projects || []).forEach((p, i) => {
+    if (p.kind === 'website' || p.enabled === false || p.auto_start === false) return;
+    setTimeout(() => startProject(p.id, { auto: true }), 1500 + i * 1200);
+  });
+}
+async function stopAllRuntime() {
+  await Promise.all([...runtime.keys()].map((id) => stopProject(id, true)));
+}
+
 function masterKey() {
   if (!state.masterKey) {
     state.masterKey = crypto.randomBytes(24).toString('hex');
@@ -880,11 +1134,18 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://x');
   const p = url.pathname;
   try {
-    if (p === '/' || p === '/index.html') {
-      const html = fs.readFileSync(PANEL, 'utf8');
+    if (PAGES[p]) {
+      let html;
+      try { html = fs.readFileSync(path.join(PAGE_DIR, PAGES[p]), 'utf8'); }
+      catch (e) { return json(res, 404, { ok: false, error: 'page not found' }); }
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
-      return res.end(html);
+      return res.end(req.method === 'HEAD' ? undefined : html);
     }
+    if (p === '/kangle.html') {
+      res.writeHead(302, { Location: '/dashboard.html' });
+      return res.end();
+    }
+    if (p === '/favicon.ico') { res.writeHead(204); return res.end(); }
     if (p.startsWith('/assets/')) return serveAsset(req, res, url);
     if (p === '/s' || p.startsWith('/s/')) return serveSite(req, res, url);
     if (p === '/api/login' && req.method === 'POST') {
@@ -911,6 +1172,36 @@ const server = http.createServer(async (req, res) => {
         ok: true, lastBackup: state.lastBackup || null, lastSync: state.lastSync || null,
         history: (state.history || []).slice(-40).reverse(),
       });
+    }
+    if (p === '/api/runtime' && req.method === 'GET') {
+      return json(res, 200, { ok: true, mode: RUNTIME_MODE, projects: runtimeStatus() });
+    }
+    if (p === '/api/runtime/logs' && req.method === 'GET') {
+      const id = url.searchParams.get('id');
+      return json(res, 200, { ok: true, id, log: runtimeLogs(id) });
+    }
+    if (p === '/api/runtime/start' && req.method === 'POST') {
+      const b = await readBody(req);
+      const id = String(b.id || '').trim();
+      if (!id) return json(res, 400, { ok: false, error: 'id required' });
+      setProjectAutoStart(id, true);
+      const r = await startProject(id, { manual: true });
+      return json(res, r.ok ? 200 : 400, Object.assign({ runtime: runtimeStatus() }, r));
+    }
+    if (p === '/api/runtime/stop' && req.method === 'POST') {
+      const b = await readBody(req);
+      const id = String(b.id || '').trim();
+      if (!id) return json(res, 400, { ok: false, error: 'id required' });
+      setProjectAutoStart(id, false);
+      await stopProject(id, false);
+      return json(res, 200, { ok: true, runtime: runtimeStatus() });
+    }
+    if (p === '/api/runtime/restart' && req.method === 'POST') {
+      const b = await readBody(req);
+      const id = String(b.id || '').trim();
+      if (!id) return json(res, 400, { ok: false, error: 'id required' });
+      const r = await restartProject(id);
+      return json(res, r.ok ? 200 : 400, Object.assign({ runtime: runtimeStatus() }, r));
     }
     if (p === '/api/key' && req.method === 'GET') {
       return json(res, 200, { ok: true, key: masterKey() });
@@ -975,6 +1266,15 @@ const server = http.createServer(async (req, res) => {
       if (idx >= 0) reg.projects[idx] = project; else reg.projects.push(project);
       saveProjects(reg);
       log('PROJECT saved: ' + project.id + ' kind=' + project.kind + ' cmd=' + (project.start_command || '—'));
+      if (RUNTIME_MODE === 'render' && !process.env.ZEX_NO_RUNTIME) {
+        if (project.kind === 'website') {
+          stopProject(project.id, true);
+        } else {
+          syncRuntimeFiles(project, true);
+          if (project.auto_start === false) stopProject(project.id, true);
+          else setTimeout(() => { startProject(project.id, { manual: true, force: true }); }, 200);
+        }
+      }
       fireWebhooks('project.saved', { id: project.id, kind: project.kind, name: project.name });
       const dep = await requestDeploy('project-save');
       return json(res, 200, { ok: true, project, public_url: apiPathForProject(project), deploy: dep });
@@ -987,6 +1287,9 @@ const server = http.createServer(async (req, res) => {
       reg.projects = reg.projects.filter((x) => x.id !== id);
       saveProjects(reg);
       log('PROJECT deleted: ' + id + ' (' + (before - reg.projects.length) + ')');
+      if (RUNTIME_MODE === 'render' && !process.env.ZEX_NO_RUNTIME) {
+        stopProject(id, true).then(() => { runtime.delete(id); try { fs.rmSync(path.join(RUNTIME_DIR, id), { recursive: true, force: true }); } catch (e) {} });
+      }
       fireWebhooks('project.deleted', { id, removed: before - reg.projects.length });
       const dep = await requestDeploy('project-delete');
       return json(res, 200, { ok: true, removed: before - reg.projects.length, deploy: dep });
@@ -1081,5 +1384,15 @@ function auth(req) {
   }
   return ok;
 }
+
+process.on('SIGTERM', async () => {
+  log('SIGTERM received; stopping runtime');
+  try { await stopAllRuntime(); } catch (e) {}
+  setTimeout(() => process.exit(0), 500);
+});
+process.on('SIGINT', async () => {
+  try { await stopAllRuntime(); } catch (e) {}
+  setTimeout(() => process.exit(0), 300);
+});
 
 bootstrap();
