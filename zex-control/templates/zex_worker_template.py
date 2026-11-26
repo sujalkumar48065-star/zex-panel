@@ -25,6 +25,7 @@ import os
 import runpy
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -125,6 +126,53 @@ def _project_env(project):
     return env
 
 
+def _has_internet():
+    try:
+        sock = socket.create_connection(("pypi.org", 443), 4)
+        sock.close()
+        return True
+    except Exception:
+        return False
+
+
+def _install_deps(pdir):
+    marker = os.path.join(pdir, ".zex-deps-ready")
+    if os.path.exists(marker):
+        return
+    req = os.path.join(pdir, "requirements.txt")
+    pkg = os.path.join(pdir, "package.json")
+    if not os.path.exists(req) and not os.path.exists(pkg):
+        return
+    if not _has_internet():
+        print("[zex] no internet; dependency install skipped", flush=True)
+        try:
+            with open(marker, "w", encoding="utf-8") as fh:
+                fh.write("skipped: no internet\n")
+        except Exception:
+            pass
+        return
+    if os.path.exists(req):
+        try:
+            print("[zex] installing python requirements", flush=True)
+            subprocess.run(
+                [sys.executable, "-m", "pip", "install", "--quiet", "--disable-pip-version-check", "-r", req],
+                cwd=pdir, timeout=300,
+            )
+        except Exception as exc:
+            print("[zex] pip install failed: {}".format(exc), flush=True)
+    if os.path.exists(pkg) and not os.path.isdir(os.path.join(pdir, "node_modules")) and shutil.which("npm"):
+        try:
+            print("[zex] installing node dependencies", flush=True)
+            subprocess.run(["npm", "install", "--omit=dev", "--no-audit", "--no-fund"], cwd=pdir, timeout=300)
+        except Exception as exc:
+            print("[zex] npm install failed: {}".format(exc), flush=True)
+    try:
+        with open(marker, "w", encoding="utf-8") as fh:
+            fh.write("done\n")
+    except Exception:
+        pass
+
+
 def _detect_command(project, pdir):
     kind = project.get("kind") or "worker"
     if kind == "website":
@@ -175,6 +223,8 @@ def _run_project(project):
     pid = str(project.get("id", ""))
     pdir = _safe_join(PROJECTS_DIR, pid)
     command = (project.get("start_command") or "").strip() or _detect_command(project, pdir)
+    if (project.get("kind") or "") != "website":
+        _install_deps(pdir)
     if (project.get("kind") or "") == "website":
         print("[zex] project {} is a static website (served by the panel)".format(pid), flush=True)
         return
