@@ -5,7 +5,7 @@ async function zexApi(p,method='GET',body){
     try{
       const r=await fetch(p,{method,headers:Object.assign({'Content-Type':'application/json'},t?{'Authorization':'Bearer '+t}:{}),body:body?JSON.stringify(body):undefined});
       const txt=await r.text();let d;try{d=JSON.parse(txt)}catch(e){d={error:txt}};
-      if(r.status===401){try{sessionStorage.removeItem('zex_token');sessionStorage.removeItem('zex_panel_auth_v1')}catch(e){};const g=document.getElementById('zexGate');if(g)g.classList.remove('hide')}
+      if(r.status===401){try{sessionStorage.removeItem('zex_token');sessionStorage.removeItem('zex_panel_auth_v1')}catch(e){};if(!/login\.html$/.test(location.pathname))location.replace('login.html')}
       if(r.status>=500&&method==='GET'&&i<attempts-1){await new Promise(x=>setTimeout(x,700*(i+1)));continue}
       if(!r.ok)throw new Error(d.error||('HTTP '+r.status));return d
     }catch(e){lastErr=e;if(method==='GET'&&i<attempts-1){await new Promise(x=>setTimeout(x,700*(i+1)));continue}throw e}
@@ -14,7 +14,7 @@ async function zexApi(p,method='GET',body){
 }
 function rtTime(ts){if(!ts)return '—';const s=Math.max(0,Math.floor((Date.now()-ts)/1000));const h=Math.floor(s/3600),m=Math.floor((s%3600)/60);return (h?h+'h ':'')+m+'m'}
 const zpEsc=s=>String(s==null?'':s).replace(/[<>&"]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));
-let zexProjectsMap={};let overviewRetries=0;let projectsRetries=0;
+let zexProjectsMap={};let overviewRetries=0;let projectsRetries=0;let runtimeMap={};let runtimePollTimer=null;
 
 function siteUrl(p){return p&&p.kind==='website'?(location.origin+(p.public_url||('/s/'+p.id+'/'))):''}
 function fileTextName(name){return /\.(html?|css|js|mjs|cjs|json|py|txt|md|markdown|ya?ml|toml|ini|cfg|conf|env|sh|bash|jsx|tsx?|vue|svelte|sql|xml|svg|csv|log)$/i.test(String(name||''))}
@@ -65,19 +65,22 @@ function fillSessionStats(s){
 
 async function loadProjects(){
   try{
-    const [d,s]=await Promise.all([zexApi('/api/projects'),zexApi('/api/status')]);
+    const [d,s,rt]=await Promise.all([zexApi('/api/projects'),zexApi('/api/status'),zexApi('/api/runtime').catch(()=>({projects:[]}))]);
     liveProjects=d.projects||[];panelStatus=s;projectsRetries=0;
+    runtimeMap={};(rt.projects||[]).forEach(r=>{runtimeMap[r.id]=r});
     zexProjectsMap={};liveProjects.forEach(p=>zexProjectsMap[p.id]=p);
     const el=document.getElementById('zexProjects');
-    if(el)el.innerHTML=liveProjects.map(p=>`<div class="switch"><div><b>${zpEsc(p.name||p.id)}</b><div class="key-note" style="margin:4px 0 0">${zpEsc(kindLabel(p.kind))} · ${zpEsc(p.id)} · ${p.kind==='website'?(p.public_url||('/s/'+p.id+'/')):zpEsc(p.start_command||'auto-detect')} · ${Object.keys(p.files||{}).length} file(s)</div></div><div style="display:flex;gap:6px">${btn('Edit','zex-edit:'+p.id,'btn ghost')}${btn('Delete','zex-del:'+p.id,'btn ghost')}</div></div>`).join('')||'<div class="empty">No projects yet. Create your first project.</div>';
+    if(el)el.innerHTML=liveProjects.map(p=>`<div class="switch"><div><b>${zpEsc(p.name||p.id)}</b><div class="key-note" style="margin:4px 0 0">${zpEsc(kindLabel(p.kind))} · ${zpEsc(p.id)} · ${p.kind==='website'?(p.public_url||('/s/'+p.id+'/')):zpEsc(p.start_command||'auto-detect')} · ${Object.keys(p.files||{}).length} file(s)</div></div><div style="display:flex;gap:6px;align-items:center">${p.kind!=='website'?runtimeBadge(runtimeMap[p.id]):'<span class="runtime-pill ok">Static</span>'}${btn('Manage','manage-'+liveProjects.indexOf(p),'btn ghost')}</div></div>`).join('')||'<div class="empty">No projects yet. Create your first project.</div>';
     const cards=document.getElementById('liveProjectCards');if(cards)cards.innerHTML=projectCards();
+    renderRuntimePanel('liveRuntimePanel');
+    updateRuntimeBanner();
     const info=document.getElementById('projectsKaggleInfo');
-    if(info&&s){const sa=(s.sessions&&s.sessions.a)||{};const sb=(s.sessions&&s.sessions.b)||{};info.textContent='Kaggle backup · A v'+(sa.version||'—')+' ('+(sa.status||'—')+') · B v'+(sb.version||'—')+' ('+(sb.status||'—')+') · last backup '+(s.lastBackup?new Date(s.lastBackup).toLocaleString():'—')}
+    if(info&&s){const sa=(s.sessions&&s.sessions.a)||{};const sb=(s.sessions&&s.sessions.b)||{};info.textContent='Render live runtime · Kaggle backup A v'+(sa.version||'—')+' ('+(sa.status||'—')+') · B v'+(sb.version||'—')+' ('+(sb.status||'—')+') · last backup '+(s.lastBackup?new Date(s.lastBackup).toLocaleString():'—')}
     fillSessionStats(s);
     fillFileSelect();
   }catch(e){const el=document.getElementById('zexProjects');if(el)el.innerHTML='<div style="color:var(--amber)">'+zpEsc(e.message)+'</div>';const info=document.getElementById('projectsKaggleInfo');if(info)info.textContent='Backend: '+e.message;if(projectsRetries<5){projectsRetries++;setTimeout(()=>{if(current==='projects'||current==='overview')loadProjects()},4000)}}
 }
-async function loadOverview(){try{const s=await zexApi('/api/status');panelStatus=s;overviewRetries=0;try{const k=await zexApi('/api/key');masterKeyValue=k.key||''}catch(e){}fillSessionStats(s);refreshSidebar(s);await loadProjects();fillSessionStats(s);refreshSidebar(s)}catch(e){const st=document.getElementById('platformStatusText');if(st)st.textContent='Backend wake-up · retrying…';if(overviewRetries<5){overviewRetries++;setTimeout(()=>{if(current==='overview')loadOverview()},4000)}else toast('Backend: '+e.message)}}
+async function loadOverview(){try{const s=await zexApi('/api/status');panelStatus=s;overviewRetries=0;try{const k=await zexApi('/api/key');masterKeyValue=k.key||''}catch(e){}fillSessionStats(s);refreshSidebar(s);await loadProjects();await loadLiveRuntime();fillSessionStats(s);refreshSidebar(s)}catch(e){const st=document.getElementById('platformStatusText');if(st)st.textContent='Backend wake-up · retrying…';if(overviewRetries<5){overviewRetries++;setTimeout(()=>{if(current==='overview')loadOverview()},4000)}else toast('Backend: '+e.message)}}
 
 async function loadConsole(){
   const el=document.getElementById('consoleLogs');if(!el)return;
@@ -92,7 +95,7 @@ async function loadFiles(){
   if(!p){if(title)title.textContent='Project files';if(table)table.innerHTML='<div class="empty">No projects yet. Create one first.</div>';return}
   sel.value=p.id;fmTargetId=p.id;
   if(title)title.textContent='▱　/'+p.id;
-  if(note)note.textContent=p.kind==='website'?('Public URL: '+siteUrl(p)+' · uploads are live within 60 seconds.'):('Runs in Kaggle at the next handover · '+(p.start_command||'auto-detect pending'));
+  if(note)note.textContent=p.kind==='website'?('Public URL: '+siteUrl(p)+' · uploads are live within 60 seconds.'):('Render par live · save ke baad bot auto-restart hoga · '+(p.start_command||'auto-detect pending'));
   const files=Object.entries(p.files||{}).sort((a,b)=>a[0].localeCompare(b[0]));
   if(table)table.innerHTML=files.length?`<div class="table-wrap"><table class="table"><thead><tr><th>Name</th><th>Kind</th><th>Size</th><th>Modified</th></tr></thead><tbody>${files.map(([name,content])=>`<tr><td>${/\.html?$/i.test(name)?'◇':'◇'} ${zpEsc(name)}</td><td>${zpEsc(name.split('.').pop()||'file')}</td><td>${fmtBytes(contentSize(content))}</td><td>—</td></tr>`).join('')}</tbody></table></div>`:'<div class="empty">No files in this project yet.</div>';
 }
@@ -180,9 +183,12 @@ async function loadAdmin(){
 
 async function loadRuntime(){
   const out=document.getElementById('rtOut');
-  try{const s=await zexApi('/api/status');panelStatus=s;const set=(id,v)=>{const e=document.getElementById(id);if(e)e.textContent=v};
+  try{const [s,rt]=await Promise.all([zexApi('/api/status'),zexApi('/api/runtime').catch(()=>({projects:[]}))]);panelStatus=s;
+    runtimeMap={};(rt.projects||[]).forEach(r=>{runtimeMap[r.id]=r});
+    const set=(id,v)=>{const e=document.getElementById(id);if(e)e.textContent=v};
     set('rtEnabled',s.enabled?(s.syncing?'SYNCING':'ON'):'PAUSED');const sa=s.sessions&&s.sessions.a||{},sb=s.sessions&&s.sessions.b||{};
     set('rtActive',(s.active||'—').toUpperCase());set('rtA',(sa.status||'—')+' · '+rtTime(sa.startedAt));set('rtB',(sb.status||'—')+' · '+rtTime(sb.startedAt));set('rtRoleA',sa.role||'role');set('rtRoleB',sb.role||'role');set('rtProj',(s.projects&&s.projects.count)!=null?s.projects.count:'0');
+    renderRuntimePanel('runtimeLivePanel');updateRuntimeBanner();
     if(out)out.innerHTML=(s.log||[]).slice(-40).map(l=>'<div>'+zpEsc(l)+'</div>').join('')||'No log yet.';
     fillSessionStats(s);
   }catch(e){if(out)out.innerHTML='<div style="color:var(--amber)">Backend not reachable: '+zpEsc(e.message)+'</div>'}
@@ -190,15 +196,47 @@ async function loadRuntime(){
 
 function manageProject(p){
   if(!p)return;
-  const url=siteUrl(p);
-  openModal(p.name||p.id,'Registered project',`<div class="switch">Type <span class="tag">${zpEsc(kindLabel(p.kind))}</span></div><div class="switch">ID <span class="tag">${zpEsc(p.id)}</span></div><div class="switch">Runtime <span class="tag">${p.kind==='website'?'Panel static hosting':zpEsc(p.start_command||'auto-detect')}</span></div><div class="switch">Files <span class="tag">${Object.keys(p.files||{}).length}</span></div>${url?`<div class="switch">Public URL <a href="${zpEsc(url)}" target="_blank" rel="noopener" style="color:var(--green)">${zpEsc(url)}</a></div>`:''}<div class="switch">Status <span class="tag">${p.enabled===false?'Paused':'Registered'}</span></div><p class="key-note">${p.kind==='website'?'Website files are served immediately.':'Changes are applied at the next safe handover.'}</p><div style="display:flex;gap:8px;margin-top:14px">${btn('Edit','zex-edit:'+p.id,'btn')}${btn('Delete','zex-del:'+p.id,'btn danger')}</div>`,'Close',()=>{})
+  const url=siteUrl(p);const r=runtimeMap[p.id]||{status:'stopped',autoStart:p.auto_start!==false};
+  const live=p.kind!=='website';
+  const controls=live?`<div class="runtime-actions">${btn('Start','rt-live-start:'+p.id,'btn')}${btn('Stop','rt-live-stop:'+p.id,'btn ghost')}${btn('Restart','rt-live-restart:'+p.id,'btn ghost')}${btn('Logs','rt-live-logs:'+p.id,'btn ghost')}</div>`:'';
+  openModal(p.name||p.id,'Project details',`<div class="switch">Type <span class="tag">${zpEsc(kindLabel(p.kind))}</span></div><div class="switch">ID <span class="tag">${zpEsc(p.id)}</span></div><div class="switch">Runtime <span class="tag">${p.kind==='website'?'Panel static hosting':zpEsc(p.start_command||'auto-detect')}</span></div><div class="switch">Live status ${runtimeBadge(r)}</div><div class="switch">Auto-start <span class="tag">${p.auto_start!==false?'ON':'OFF'}</span></div><div class="switch">Files <span class="tag">${Object.keys(p.files||{}).length}</span></div>${url?`<div class="switch">Public URL <a href="${zpEsc(url)}" target="_blank" rel="noopener" style="color:var(--blue)">${zpEsc(url)}</a></div>`:''}${r.error?`<div class="runtime-inline-error">${zpEsc(r.error)}</div>`:''}<p class="key-note">${p.kind==='website'?'Website files are served immediately.':'Bot/worker Render par live chalta hai. Stop karne par auto-start OFF ho jata hai; Start karne par wapas ON.'}</p>${controls}<div style="display:flex;gap:8px;margin-top:14px">${btn('Edit','zex-edit:'+p.id,'btn')}${btn('Delete','zex-del:'+p.id,'btn danger')}</div>`,'Close',()=>{})
+}
+
+function rtUptime(ms){const s=Math.max(0,Math.floor(Number(ms||0)/1000));const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),x=s%60;return h?h+'h '+m+'m':m?m+'m '+x+'s':x+'s'}
+function runtimeBadge(r){const st=(r&&r.status)||'stopped';const cls=st==='running'?'ok':st==='error'?'err':(st==='restarting'||st==='installing'||st==='starting')?'warn':'muted';return `<span class="runtime-pill ${cls}">${RUNTIME_STATUS_LABEL[st]||st}</span>`}
+function renderRuntimePanel(containerId){
+  const el=document.getElementById(containerId);if(!el)return;
+  const items=liveProjects.filter(p=>p.kind!=='website');
+  if(!items.length){el.innerHTML='<div class="card panel"><div class="panel-title"><h3>Live runtime</h3><span>RENDER</span></div><div class="empty">Abhi koi bot/worker nahi hai. New project banakar Telegram/Discord bot add karein.</div></div>';return}
+  el.innerHTML=`<div class="card panel"><div class="panel-title"><h3>Live runtime</h3><span>RENDER · AUTO-RESTART</span></div>${items.map(p=>{const r=runtimeMap[p.id]||{status:'stopped',restarts:0,autoStart:p.auto_start!==false};return `<div class="runtime-row"><div class="runtime-main"><div class="runtime-name">${zpEsc(p.name||p.id)} ${runtimeBadge(r)}</div><div class="runtime-sub">${zpEsc(kindLabel(p.kind))} · ${r.uptimeMs?rtUptime(r.uptimeMs)+' uptime':'not running'} · ${r.restarts||0} restart(s) · ${r.autoStart?'auto-start ON':'auto-start OFF'}</div>${r.error?`<div class="runtime-inline-error">${zpEsc(r.error)}</div>`:''}</div><div class="runtime-actions">${btn('Start','rt-live-start:'+p.id,'btn')}${btn('Stop','rt-live-stop:'+p.id,'btn ghost')}${btn('Restart','rt-live-restart:'+p.id,'btn ghost')}${btn('Logs','rt-live-logs:'+p.id,'btn ghost')}</div></div>`}).join('')}<p class="key-note">Stop karne par auto-start OFF hota hai. Start karne par dobara ON. Crash hone par 5 baar tak khud restart hota hai; phir error banner dikhta hai.</p></div>`;
+}
+function updateRuntimeBanner(){
+  const el=document.getElementById('runtimeBanner');if(!el)return;
+  const bad=Object.values(runtimeMap).filter(r=>r.status==='error'||r.status==='restarting');
+  if(!bad.length){el.hidden=true;el.innerHTML='';return}
+  const first=bad[0];const isErr=first.status==='error';
+  el.hidden=false;el.className='runtime-banner '+(isErr?'error':'warn');
+  el.innerHTML=`<div><b>${isErr?'Bot error':'Bot restarting'}:</b> ${zpEsc(first.name||first.id)} — ${zpEsc(first.error||first.status)}${bad.length>1?' · +'+(bad.length-1)+' more':''}</div><div class="runtime-actions">${btn('Open logs','rt-live-logs:'+first.id,'btn')}${isErr?btn('Restart','rt-live-restart:'+first.id,'btn ghost'):''}</div>`;
+}
+async function loadLiveRuntime(){
+  try{const d=await zexApi('/api/runtime');runtimeMap={};(d.projects||[]).forEach(r=>{runtimeMap[r.id]=r});renderRuntimePanel('liveRuntimePanel');renderRuntimePanel('runtimeLivePanel');updateRuntimeBanner();const cards=document.getElementById('liveProjectCards');if(cards)cards.innerHTML=projectCards();const el=document.getElementById('zexProjects');if(el&&current==='projects'&&!document.getElementById('modalBackdrop').classList.contains('show')){el.innerHTML=liveProjects.map(p=>`<div class="switch"><div><b>${zpEsc(p.name||p.id)}</b><div class="key-note" style="margin:4px 0 0">${zpEsc(kindLabel(p.kind))} · ${zpEsc(p.id)} · ${p.kind==='website'?(p.public_url||('/s/'+p.id+'/')):zpEsc(p.start_command||'auto-detect')} · ${Object.keys(p.files||{}).length} file(s)</div></div><div style="display:flex;gap:6px;align-items:center">${p.kind!=='website'?runtimeBadge(runtimeMap[p.id]):'<span class="runtime-pill ok">Static</span>'}${btn('Manage','manage-'+liveProjects.indexOf(p),'btn ghost')}</div></div>`).join('')||'<div class="empty">No projects yet. Create your first project.</div>'}
+  }catch(e){/* keep last known state */}
+}
+async function runtimeAction(id,action){
+  const labels={start:'Starting',stop:'Stopping',restart:'Restarting'};toast((labels[action]||'Working')+'…');
+  try{await zexApi('/api/runtime/'+action,'POST',{id});toast(action==='stop'?'Stopped · auto-start OFF':action==='start'?'Started':'Restarted');await loadLiveRuntime();await loadProjects()}catch(e){toast('Runtime: '+e.message);await loadLiveRuntime()}
+}
+async function showRuntimeLogs(id){
+  try{const d=await zexApi('/api/runtime/logs?id='+encodeURIComponent(id));const p=zexProjectsMap[id]||liveProjects.find(x=>x.id===id)||{};const lines=(d.log||[]).slice(-300);openModal('Logs · '+(p.name||id),'Live Render process output',`<div class="logs" style="max-height:380px;overflow:auto">${lines.map(l=>'<div>'+zpEsc(l)+'</div>').join('')||'No logs yet. Start the project.'}</div>`,'Close',()=>{})}catch(e){toast('Logs: '+e.message)}
 }
 
 function projectModal(project){
   const p=project||{name:'',id:'',kind:'worker',start_command:'',requirements:'',env:{},files:{}};
   const existing=Object.keys(p.files||{}).length;
   const kindOpts=['website','discord_bot','telegram_bot','api','worker'].map(k=>`<option value="${k}"${(p.kind||'worker')===k?' selected':''}>${KIND_LABELS[k]}</option>`).join('');
-  const body=`<div class="field"><label>Project name</label><input id="zpName" value="${zpEsc(p.name||'')}" placeholder="My project"></div><div class="field"><label>Project ID</label><input id="zpId" value="${zpEsc(p.id||'')}" placeholder="my-project"${project?' readonly':''}></div><div class="field"><label>What do you want to host?</label><select id="zpKind">${kindOpts}</select></div><p class="key-note" id="zpKindHint" style="margin-top:-6px">${zpEsc(KIND_HINTS[p.kind||'worker'])}</p><div class="field"><label>Upload project files</label><input id="zpUpload" type="file" multiple></div>${existing?`<p class="key-note">${existing} existing file(s) are kept. Uploading a file with the same name replaces it.</p>`:''}<div class="field"><label>Or paste one file</label><input id="zpFileName" placeholder="main.py / index.html"></div><div class="field"><textarea id="zpCode" style="min-height:100px" placeholder="Paste code here (optional)"></textarea></div><div class="field"><label>Environment variables (optional)</label><textarea id="zpEnv" style="min-height:76px" placeholder="DISCORD_TOKEN=your-token&#10;OWNER_ID=123456789">${zpEsc(Object.entries(p.env||{}).map(([k,v])=>k+'='+v).join('\n'))}</textarea></div><div class="field"><label>Start command (optional)</label><input id="zpCmd" value="${zpEsc(p.start_command||'')}" placeholder="Leave blank — detected automatically"></div>`;
+  const isBot=(p.kind==='telegram_bot'||p.kind==='discord_bot');
+  const tokenHelp=KIND_TOKEN_HELP[p.kind||'']||'';
+  const body=`<div class="field"><label>Project name</label><input id="zpName" value="${zpEsc(p.name||'')}" placeholder="My project"></div><div class="field"><label>Project ID</label><input id="zpId" value="${zpEsc(p.id||'')}" placeholder="my-project"${project?' readonly':''}></div><div class="field"><label>What do you want to host?</label><select id="zpKind">${kindOpts}</select></div><p class="key-note" id="zpKindHint" style="margin-top:-6px">${zpEsc(KIND_HINTS[p.kind||'worker'])}</p><div class="field" id="zpTokenWrap" style="${isBot?'':'display:none'}"><label>Bot token</label><input id="zpToken" type="password" autocomplete="off" placeholder="Paste token here (optional if already in env)"><p class="key-note" id="zpTokenHelp">${zpEsc(tokenHelp)}</p></div><div class="field"><label>Upload project files</label><input id="zpUpload" type="file" multiple></div>${existing?`<p class="key-note">${existing} existing file(s) are kept. Uploading a file with the same name replaces it.</p>`:''}<div class="field"><label>Or paste one file</label><input id="zpFileName" placeholder="bot.py / index.html"></div><div class="field"><textarea id="zpCode" style="min-height:100px" placeholder="Paste code here (optional)"></textarea></div><div class="field"><label>Environment variables (optional)</label><textarea id="zpEnv" style="min-height:76px" placeholder="DISCORD_TOKEN=your-token&#10;OWNER_ID=123456789">${zpEsc(Object.entries(p.env||{}).map(([k,v])=>k+'='+v).join('\n'))}</textarea></div><div class="field"><label>Start command (optional)</label><input id="zpCmd" value="${zpEsc(p.start_command||'')}" placeholder="Leave blank — detected automatically"></div><label class="switch" style="margin-top:4px">Auto-start on Render <input id="zpAuto" type="checkbox" ${p.auto_start!==false?'checked':''}></label>`;
   openModal(project?'Edit project':'New project','Choose what to host and upload files. ZEX detects the runtime and start command.',body,'Save project',async()=>{
     const files=Object.assign({},p.files||{});
     const upload=document.getElementById('zpUpload');
@@ -207,14 +245,17 @@ function projectModal(project){
     if(fname.trim()&&code){files[fname.trim().replace(/^\/+/,'')]=code}
     const name=(document.getElementById('zpName')||{}).value||'';const id=((document.getElementById('zpId')||{}).value||slugify(name)).trim().toLowerCase();const kind=(document.getElementById('zpKind')||{}).value||'worker';const cmd=(document.getElementById('zpCmd')||{}).value||'';
     const env={};String((document.getElementById('zpEnv')||{}).value||'').split(/\r?\n/).forEach(line=>{const m=line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/);if(m)env[m[1]]=m[2]});
+    const token=((document.getElementById('zpToken')||{}).value||'').trim();
+    if(token){if(kind==='telegram_bot'){env.TELEGRAM_BOT_TOKEN=token;env.BOT_TOKEN=token}else if(kind==='discord_bot'){env.DISCORD_TOKEN=token;env.BOT_TOKEN=token}}
+    const autoStart=!!(document.getElementById('zpAuto')||{}).checked;
     if(!name.trim()){toast('Enter a project name');return false}
     if(!/^[a-z0-9][a-z0-9._-]{1,63}$/.test(id)){toast('Project ID must be a lowercase slug (2-64 chars)');return false}
     if(!Object.keys(files).length&&!cmd.trim()){toast(kind==='website'?'Upload at least index.html for a website':'Upload project files or enter a start command');return false}
-    const out=Object.assign({},p,{id,name:name.trim(),kind,start_command:cmd.trim(),files,env,enabled:p.enabled!==false});
-    try{const r=await zexApi('/api/projects','POST',{project:out});toast(r.public_url?('Saved · live at '+location.origin+r.public_url):'Saved · applies at next safe handover');await loadProjects();if(current==='files')await loadFiles();if(current==='overview')await loadOverview()}catch(e){toast('Save failed: '+e.message);return false}
+    const out=Object.assign({},p,{id,name:name.trim(),kind,start_command:cmd.trim(),files,env,enabled:p.enabled!==false,auto_start:autoStart});
+    try{const r=await zexApi('/api/projects','POST',{project:out});toast(r.public_url?('Saved · live at '+location.origin+r.public_url):'Saved · Render par start ho raha hai');await loadProjects();await loadLiveRuntime();if(current==='files')await loadFiles();if(current==='overview')await loadOverview()}catch(e){toast('Save failed: '+e.message);return false}
   });
   const kindSel=document.getElementById('zpKind');const hint=document.getElementById('zpKindHint');
-  if(kindSel&&hint)kindSel.addEventListener('change',()=>{hint.textContent=KIND_HINTS[kindSel.value]||''});
+  if(kindSel&&hint)kindSel.addEventListener('change',()=>{hint.textContent=KIND_HINTS[kindSel.value]||'';const bot=kindSel.value==='telegram_bot'||kindSel.value==='discord_bot';const wrap=document.getElementById('zpTokenWrap');if(wrap)wrap.style.display=bot?'':'none';const th=document.getElementById('zpTokenHelp');if(th)th.textContent=KIND_TOKEN_HELP[kindSel.value]||''});
   const nameEl=document.getElementById('zpName');const idEl=document.getElementById('zpId');
   if(nameEl&&idEl){let touched=!!p.id;idEl.addEventListener('input',()=>{touched=!!idEl.value});nameEl.addEventListener('input',()=>{if(!touched)idEl.value=slugify(nameEl.value)})}
 }
