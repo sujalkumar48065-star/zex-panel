@@ -98,8 +98,10 @@ def _prepare_projects(bundle):
         cfg = {
             "id": pid,
             "name": project.get("name") or pid,
+            "kind": project.get("kind") or "worker",
             "enabled": bool(project.get("enabled", True)),
             "start_command": project.get("start_command") or "",
+            "public_url": project.get("public_url") or "",
             "env": project.get("env") or {},
             "requirements": req,
         }
@@ -123,12 +125,61 @@ def _project_env(project):
     return env
 
 
+def _detect_command(project, pdir):
+    kind = project.get("kind") or "worker"
+    if kind == "website":
+        return ""
+    names = set()
+    for root, _dirs, files in os.walk(pdir):
+        for name in files:
+            rel = os.path.relpath(os.path.join(root, name), pdir).replace(os.sep, "/")
+            names.add(rel)
+    def find(cands):
+        for cand in cands:
+            if cand in names:
+                return cand
+            for name in names:
+                if name.endswith("/" + cand):
+                    return name
+        return None
+    if "package.json" in names:
+        try:
+            with open(os.path.join(pdir, "package.json"), encoding="utf-8") as fh:
+                pkg = json.load(fh)
+            if (pkg.get("scripts") or {}).get("start"):
+                return "npm start"
+        except Exception:
+            pass
+    py_pref = {
+        "discord_bot": ["bot.py", "main.py", "app.py", "index.py", "run.py", "server.py"],
+        "telegram_bot": ["bot.py", "main.py", "app.py", "index.py", "run.py", "server.py"],
+        "api": ["app.py", "main.py", "server.py", "index.py", "run.py"],
+        "worker": ["main.py", "worker.py", "app.py", "run.py", "index.py"],
+    }.get(kind, ["main.py", "app.py", "bot.py", "worker.py", "run.py", "index.py"])
+    py = find(py_pref)
+    if py:
+        return "python3 -u " + py
+    node_pref = {
+        "discord_bot": ["index.js", "bot.js", "main.js", "server.js"],
+        "telegram_bot": ["index.js", "bot.js", "main.js", "server.js"],
+        "api": ["server.js", "index.js", "app.js", "main.js"],
+        "worker": ["index.js", "worker.js", "main.js", "server.js"],
+    }.get(kind, ["index.js", "server.js", "app.js", "main.js"])
+    node = find(node_pref)
+    if node:
+        return "node " + node
+    return ""
+
+
 def _run_project(project):
     pid = str(project.get("id", ""))
     pdir = _safe_join(PROJECTS_DIR, pid)
-    command = (project.get("start_command") or "").strip()
+    command = (project.get("start_command") or "").strip() or _detect_command(project, pdir)
+    if (project.get("kind") or "") == "website":
+        print("[zex] project {} is a static website (served by the panel)".format(pid), flush=True)
+        return
     if not command:
-        print("[zex] project {} has no start_command; skipped".format(pid), flush=True)
+        print("[zex] project {} has no detected start command; skipped".format(pid), flush=True)
         return
     while not _stop.is_set():
         if ROLE != "active":
