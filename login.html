@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#f4f8ff">
+<title>Login · ZEX Cloud</title>
+<link rel="stylesheet" href="assets/portal.css?v=20261126e">
+</head>
+<body class="login-page">
+<div class="login-card">
+  <a class="land-brand" href="index.html"><span class="mark">✦</span><span><b>ZEX</b><small>CLOUD PANEL</small></span></a>
+  <h1>Welcome back</h1>
+  <p class="login-sub">Panel password daalein. Sirf aap hi apne projects dekh sakte hain.</p>
+  <label for="pass">Password</label>
+  <div class="pass-wrap"><input id="pass" type="password" autocomplete="current-password" placeholder="Enter panel password" autofocus><button id="eye" type="button" aria-label="Show password">◉</button></div>
+  <button class="btn primary wide" id="loginBtn" type="button">Unlock dashboard</button>
+  <div class="login-err" id="err"></div>
+  <div class="login-foot"><span><i class="dot"></i> Secure session</span><a href="index.html">← Back</a></div>
+</div>
+<script>
+(function(){
+  var pass=document.getElementById('pass'),err=document.getElementById('err'),btn=document.getElementById('loginBtn');
+  try{if(sessionStorage.getItem('zex_token'))location.replace('dashboard.html')}catch(e){}
+  function show(m){err.textContent=m||''}
+  async function login(){
+    var v=pass.value;if(!v){show('Password daalein.');pass.focus();return}
+    btn.disabled=true;btn.textContent='Checking…';show('');
+    try{
+      var r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:v})});
+      var d=await r.json().catch(function(){return {}});
+      if(!r.ok)throw new Error(d.error==='wrong password'?'Password galat hai. Dobara try karein.':(d.error||'Login failed'));
+      if(!d.token)throw new Error('Token nahi mila. Dobara try karein.');
+      sessionStorage.setItem('zex_token',d.token);sessionStorage.setItem('zex_panel_auth_v1','1');
+      location.replace('dashboard.html');
+    }catch(e){show(e.message||'Login failed');pass.select()}
+    finally{btn.disabled=false;btn.textContent='Unlock dashboard'}
+  }
+  btn.addEventListener('click',login);
+  pass.addEventListener('keydown',function(e){if(e.key==='Enter')login()});
+  pass.addEventListener('input',function(){show('')});
+  document.getElementById('eye').addEventListener('click',function(){var t=pass.type==='password';pass.type=t?'text':'password';this.textContent=t?'◉':'◌'});
+})();
+</script>
+</body></html>
