@@ -6,6 +6,7 @@ const fs = require('fs');
 const path = require('path');
 const zlib = require('zlib');
 const crypto = require('crypto');
+const os = require('os');
 const { spawn } = require('child_process');
 
 const ROOT = __dirname;
@@ -44,6 +45,8 @@ if (process.env.ZEX_KAGGLE_USER && process.env.ZEX_KAGGLE_KEY) {
 const RUNTIME_DIR = path.join(ROOT, 'data', 'runtime');
 const RUNTIME_MODE = String(process.env.ZEX_RUNTIME_MODE || cfg.runtimeMode || 'render').toLowerCase();
 const runtime = new Map();
+const storageCache = new Map();
+const CLOCK_TICKS = 100;
 const PANEL_PASSWORD = process.env.ZEX_PANEL_PASSWORD || cfg.password;
 const PORT = Number(process.env.PORT || cfg.port);
 const HOST = process.env.HOST || cfg.host || '0.0.0.0';
@@ -679,6 +682,7 @@ function publicStatus() {
     projects: { count: reg.projects.length, updated_at: reg.updated_at },
     runtimeMode: RUNTIME_MODE,
     runtime: RUNTIME_MODE === 'render' ? runtimeStatus() : [],
+    system: systemMetrics(),
     apiRequests: Number(state.apiRequests || 0),
     startedAt: state.startedAt || null,
     settings: state.settings || { name: 'ZEX PERSONAL PANEL', slug: 'zex' },
@@ -836,6 +840,7 @@ function safeRuntimePath(base, rel) {
   return path.join(base, ...parts);
 }
 function syncRuntimeFiles(project, resetDeps) {
+  storageCache.delete(project.id);
   const dir = path.join(RUNTIME_DIR, project.id);
   fs.mkdirSync(dir, { recursive: true });
   for (const [rel, content] of Object.entries(project.files || {})) {
@@ -1021,11 +1026,208 @@ function setProjectAutoStart(id, value) {
   saveProjects(reg);
   return true;
 }
-function processMemoryMb(pid) {
+function readProcStat(pid) {
   try {
-    const statm = fs.readFileSync('/proc/' + pid + '/statm', 'utf8').trim().split(/\s+/);
-    return Math.round(Number(statm[1] || 0) * 4096 / 1048576 * 10) / 10;
+    const raw = fs.readFileSync('/proc/' + pid + '/stat', 'utf8');
+    const close = raw.lastIndexOf(')');
+    if (close < 0) return null;
+    const f = raw.slice(close + 2).trim().split(/\s+/);
+    return {
+      pid: Number(pid), state: f[0], ppid: Number(f[1]),
+      utime: Number(f[11] || 0), stime: Number(f[12] || 0),
+      threads: Number(f[17] || 0), rssPages: Number(f[21] || 0),
+    };
   } catch (e) { return null; }
+}
+function procTable() {
+  const table = new Map();
+  let names = [];
+  try { names = fs.readdirSync('/proc'); } catch (e) { return table; }
+  for (const name of names) {
+    if (!/^\d+$/.test(name)) continue;
+    const row = readProcStat(name);
+    if (row) table.set(row.pid, row);
+  }
+  return table;
+}
+function processTreeIds(rootPid, table) {
+  const children = new Map();
+  for (const row of table.values()) {
+    if (!children.has(row.ppid)) children.set(row.ppid, []);
+    children.get(row.ppid).push(row.pid);
+  }
+  const ids = [];
+  const seen = new Set();
+  const stack = [Number(rootPid)];
+  while (stack.length) {
+    const pid = stack.pop();
+    if (!pid || seen.has(pid)) continue;
+    seen.add(pid);
+    ids.push(pid);
+    for (const child of children.get(pid) || []) stack.push(child);
+  }
+  return ids;
+}
+function projectProcessStats(rootPid, runtimeRow) {
+  if (!rootPid) return { pid: null, memoryMb: null, cpuPercent: null, processes: 0 };
+  const table = procTable();
+  const ids = processTreeIds(rootPid, table);
+  let rssPages = 0;
+  let ticks = 0;
+  let processes = 0;
+  for (const pid of ids) {
+    const row = table.get(pid);
+    if (!row) continue;
+    processes++;
+    rssPages += row.rssPages;
+    ticks += row.utime + row.stime;
+  }
+  const memoryMb = Math.round(rssPages * 4096 / 1048576 * 10) / 10;
+  let cpuPercent = null;
+  if (runtimeRow) {
+    const prev = runtimeRow.cpuSample;
+    const now = Date.now();
+    if (prev && now > prev.at && ticks >= prev.ticks) {
+      const elapsed = (now - prev.at) / 1000;
+      if (elapsed > 0) cpuPercent = Math.max(0, Math.round((ticks - prev.ticks) / (elapsed * CLOCK_TICKS) * 1000) / 10);
+    }
+    runtimeRow.cpuSample = { ticks, at: now };
+  }
+  return { pid: Number(rootPid), memoryMb, cpuPercent, processes };
+}
+function readMemInfo() {
+  const out = {};
+  try {
+    for (const line of fs.readFileSync('/proc/meminfo', 'utf8').split('\n')) {
+      const m = line.match(/^(\w+):\s+(\d+)/);
+      if (m) out[m[1]] = Number(m[2]) * 1024;
+    }
+  } catch (e) {}
+  return out;
+}
+function cgroupMemory() {
+  const pairs = [
+    ['/sys/fs/cgroup/memory.current', '/sys/fs/cgroup/memory.max'],
+    ['/sys/fs/cgroup/memory/memory.usage_in_bytes', '/sys/fs/cgroup/memory/memory.limit_in_bytes'],
+  ];
+  for (const [usagePath, limitPath] of pairs) {
+    try {
+      const used = Number(fs.readFileSync(usagePath, 'utf8').trim());
+      const rawLimit = fs.readFileSync(limitPath, 'utf8').trim();
+      const limit = rawLimit === 'max' ? 0 : Number(rawLimit);
+      if (Number.isFinite(used) && used > 0 && Number.isFinite(limit) && limit > 0 && limit < 1e15) {
+        return { totalBytes: limit, usedBytes: used, availableBytes: Math.max(0, limit - used), source: 'container' };
+      }
+    } catch (e) {}
+  }
+  return null;
+}
+let lastCpuTimes = null;
+function readCpuTimes() {
+  try {
+    const parts = fs.readFileSync('/proc/stat', 'utf8').split('\n')[0].trim().split(/\s+/).slice(1).map(Number);
+    const total = parts.reduce((a, b) => a + (Number.isFinite(b) ? b : 0), 0);
+    const idle = (parts[3] || 0) + (parts[4] || 0);
+    return { total, idle };
+  } catch (e) { return null; }
+}
+function systemCpuPercent() {
+  const cur = readCpuTimes();
+  if (cur && lastCpuTimes && cur.total > lastCpuTimes.total) {
+    const total = cur.total - lastCpuTimes.total;
+    const idle = cur.idle - lastCpuTimes.idle;
+    lastCpuTimes = cur;
+    return Math.max(0, Math.min(100, Math.round((1 - idle / total) * 1000) / 10));
+  }
+  if (cur) lastCpuTimes = cur;
+  const cores = os.cpus().length || 1;
+  return Math.max(0, Math.min(100, Math.round(os.loadavg()[0] / cores * 1000) / 10));
+}
+function readUptimeMs() {
+  try { return Math.round(Number(fs.readFileSync('/proc/uptime', 'utf8').split(' ')[0]) * 1000); }
+  catch (e) { return Math.round(os.uptime() * 1000); }
+}
+function diskMetrics() {
+  try {
+    const st = fs.statfsSync(ROOT);
+    const totalBytes = Number(st.bsize) * Number(st.blocks);
+    const freeBytes = Number(st.bsize) * Number(st.bavail);
+    const usedBytes = Math.max(0, totalBytes - freeBytes);
+    return {
+      totalBytes, freeBytes, usedBytes,
+      percent: totalBytes ? Math.round(usedBytes / totalBytes * 1000) / 10 : 0,
+    };
+  } catch (e) { return null; }
+}
+function dirSize(dir) {
+  let bytes = 0;
+  let files = 0;
+  const stack = [dir];
+  while (stack.length) {
+    const cur = stack.pop();
+    let entries = [];
+    try { entries = fs.readdirSync(cur, { withFileTypes: true }); } catch (e) { continue; }
+    for (const ent of entries) {
+      const target = path.join(cur, ent.name);
+      if (ent.isDirectory()) { stack.push(target); continue; }
+      if (!ent.isFile()) continue;
+      try { bytes += fs.statSync(target).size; files++; } catch (e) {}
+    }
+  }
+  return { bytes, files };
+}
+function projectStorage(project) {
+  const id = project.id;
+  const cached = storageCache.get(id);
+  if (cached && Date.now() - cached.at < 30000) return cached.value;
+  let codeBytes = 0;
+  let fileCount = 0;
+  for (const content of Object.values(project.files || {})) {
+    codeBytes += contentBuffer(content).length;
+    fileCount++;
+  }
+  let diskBytes = codeBytes;
+  let diskFiles = fileCount;
+  if (project.kind !== 'website') {
+    const runtimeDir = path.join(RUNTIME_DIR, id);
+    try {
+      if (fs.existsSync(runtimeDir)) {
+        const d = dirSize(runtimeDir);
+        diskBytes = Math.max(codeBytes, d.bytes);
+        diskFiles = Math.max(fileCount, d.files);
+      }
+    } catch (e) {}
+  }
+  const value = { codeBytes, diskBytes, files: fileCount, diskFiles };
+  storageCache.set(id, { at: Date.now(), value });
+  return value;
+}
+function systemMetrics() {
+  const meminfo = readMemInfo();
+  const cg = cgroupMemory();
+  const memTotal = (cg && cg.totalBytes) || meminfo.MemTotal || 0;
+  const memUsed = (cg && cg.usedBytes) || (meminfo.MemTotal && meminfo.MemAvailable ? meminfo.MemTotal - meminfo.MemAvailable : 0);
+  const memory = {
+    totalBytes: memTotal,
+    usedBytes: memUsed,
+    availableBytes: Math.max(0, memTotal - memUsed),
+    percent: memTotal ? Math.round(memUsed / memTotal * 1000) / 10 : 0,
+    source: cg ? 'container' : 'system',
+  };
+  const disk = diskMetrics();
+  const cpuPercent = systemCpuPercent();
+  const cpus = os.cpus();
+  return {
+    cpuPercent,
+    cpuCount: cpus.length || 1,
+    loadavg: os.loadavg().map((x) => Math.round(x * 100) / 100),
+    memory,
+    disk,
+    uptimeMs: readUptimeMs(),
+    panelUptimeMs: Math.round(process.uptime() * 1000),
+    platform: process.platform,
+    node: process.version,
+  };
 }
 function runtimeStatus() {
   const reg = loadProjects();
@@ -1034,16 +1236,52 @@ function runtimeStatus() {
   }
   return [...runtime.values()].filter((r) => (reg.projects || []).some((x) => x.id === r.id && x.kind !== 'website')).map((r) => {
     const p = (reg.projects || []).find((x) => x.id === r.id) || {};
+    const ps = projectProcessStats(r.proc ? r.proc.pid : null, r);
     return {
       id: r.id, name: p.name || r.id, kind: p.kind || 'worker',
-      status: r.status, pid: r.proc ? r.proc.pid : null, memoryMb: r.proc ? processMemoryMb(r.proc.pid) : null,
+      status: r.status, pid: ps.pid, memoryMb: ps.memoryMb, cpuPercent: ps.cpuPercent, processes: ps.processes,
       startedAt: r.startedAt, uptimeMs: r.startedAt && r.status === 'running' ? Date.now() - r.startedAt : 0,
       restarts: r.restarts, error: r.error, lastExit: r.lastExit,
       autoStart: p.auto_start !== false, installing: r.installing,
       command: p.start_command || '', public_url: p.public_url || '',
+      storageBytes: projectStorage(p).diskBytes,
       logs: r.logs.slice(-30),
     };
   });
+}
+function metricsSnapshot() {
+  const reg = loadProjects();
+  const rows = runtimeStatus();
+  const byId = {};
+  for (const row of rows) byId[row.id] = row;
+  const projects = (reg.projects || []).map((p) => {
+    const live = byId[p.id] || {};
+    const storage = projectStorage(p);
+    return {
+      id: p.id, name: p.name || p.id, kind: p.kind,
+      status: p.kind === 'website' ? 'static' : (live.status || 'stopped'),
+      pid: live.pid || null,
+      cpuPercent: live.cpuPercent == null ? null : live.cpuPercent,
+      memoryMb: live.memoryMb == null ? null : live.memoryMb,
+      storageBytes: storage.diskBytes,
+      codeBytes: storage.codeBytes,
+      files: storage.files,
+      uptimeMs: live.uptimeMs || 0,
+      restarts: live.restarts || 0,
+      autoStart: p.auto_start !== false,
+      error: live.error || null,
+      public_url: p.public_url || '',
+    };
+  });
+  const totals = {
+    projects: projects.length,
+    running: projects.filter((p) => p.status === 'running').length,
+    errors: projects.filter((p) => p.status === 'error').length,
+    stopped: projects.filter((p) => p.status === 'stopped' || p.status === 'static').length,
+    storageBytes: projects.reduce((a, p) => a + (p.storageBytes || 0), 0),
+    memoryMb: Math.round(projects.reduce((a, p) => a + (p.memoryMb || 0), 0) * 10) / 10,
+  };
+  return { ok: true, at: Date.now(), system: systemMetrics(), projects, totals };
 }
 function runtimeLogs(id) {
   const r = runtime.get(id);
@@ -1177,6 +1415,9 @@ const server = http.createServer(async (req, res) => {
     if (p === '/api/status') {
       return json(res, 200, publicStatus());
     }
+    if (p === '/api/metrics' && req.method === 'GET') {
+      return json(res, 200, metricsSnapshot());
+    }
     if (p === '/api/logs') {
       return json(res, 200, { ok: true, log: memLog.slice(-300) });
     }
@@ -1299,6 +1540,7 @@ const server = http.createServer(async (req, res) => {
       const before = reg.projects.length;
       reg.projects = reg.projects.filter((x) => x.id !== id);
       saveProjects(reg);
+      storageCache.delete(id);
       log('PROJECT deleted: ' + id + ' (' + (before - reg.projects.length) + ')');
       if (RUNTIME_MODE === 'render' && !process.env.ZEX_NO_RUNTIME) {
         const rr = runtimeEntry(id);
