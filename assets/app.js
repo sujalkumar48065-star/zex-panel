@@ -10,6 +10,7 @@ document.addEventListener('click',async e=>{
   const el=e.target.closest('[data-action]');if(!el)return;
   const act=el.dataset.action;
   if(act==='new-project'||act==='deploy'||act==='zex-new'){projectModal(null);return}
+  if(act.startsWith('new-kind:')){projectModal({kind:act.slice(9)});return}
   if(act.startsWith('template:')){const kind=act.slice(9);projectModal({name:'',id:'',kind,start_command:'',files:{},env:{}});return}
   if(act.startsWith('manage-')){const p=liveProjects[+act.split('-')[1]];if(p)manageProject(p);return}
   if(act.startsWith('zex-edit:')){const p=zexProjectsMap[act.slice(9)];if(p)projectModal(p);return}
@@ -55,6 +56,7 @@ $('#modalBackdrop').addEventListener('click',e=>{if(e.target.id==='modalBackdrop
 $('#globalSearch').addEventListener('keydown',e=>{if(e.key==='Enter'){let q=e.target.value.toLowerCase().trim();if(!q){toast('Enter a search term.');return}let p=liveProjects.find(x=>(x.name||x.id||'').toLowerCase().includes(q)||(x.id||'').toLowerCase().includes(q)||(x.start_command||'').toLowerCase().includes(q));if(p){current='projects';render();toast('Showing project '+p.id)}else toast('No matching project.')}});
 document.addEventListener('keydown',e=>{if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==='k'){e.preventDefault();$('#globalSearch').focus()}if(e.key==='Escape')$('#modalBackdrop').classList.remove('show')});
 $('#content').addEventListener('change',async e=>{
+  if(e.target.id==='consoleProject'){await loadConsole();return}
   if(e.target.id==='fmSelect'){await loadFiles();return}
   if(e.target.id==='fileInput'){
     if(!fmTargetId){toast('Select a project in File manager first');return}
@@ -69,6 +71,8 @@ function startRuntimePoll(){
   if(runtimePollTimer)clearInterval(runtimePollTimer);
   runtimePollTimer=setInterval(function(){if(document.hidden)return;if(document.getElementById('content'))loadLiveRuntime()},5000);
 }
+window.addEventListener('unhandledrejection',function(e){try{toast('Unexpected: '+((e.reason&&e.reason.message)||e.reason||'error'))}catch(x){}});
+window.addEventListener('error',function(e){if(e&&e.message&&/ResizeObserver|Script error/i.test(e.message))return;try{toast('JS error: '+e.message)}catch(x){}});
 (function(){
   if(!sessionStorage.getItem('zex_token')){location.replace('login.html');return}
   render();startRuntimePoll();setTimeout(loadLiveRuntime,800);
