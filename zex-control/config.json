@@ -20,5 +20,6 @@
     "failoverServiceIds": [],
     "failoverAfterFailures": 2
   },
-  "runtimeMode": "render"
+  "runtimeMode": "kaggle",
+  "panelUrl": "https://zex-cloud-panel.onrender.com"
 }

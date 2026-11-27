@@ -44,8 +44,14 @@ if (process.env.ZEX_KAGGLE_USER && process.env.ZEX_KAGGLE_KEY) {
 }
 const RUNTIME_DIR = path.join(ROOT, 'data', 'runtime');
 const RUNTIME_MODE = String(process.env.ZEX_RUNTIME_MODE || cfg.runtimeMode || 'render').toLowerCase();
+function panelUrl() {
+  return String(process.env.ZEX_PANEL_URL || cfg.panelUrl || process.env.RENDER_EXTERNAL_URL || 'https://zex-cloud-panel.onrender.com').replace(/\/+$/, '');
+}
 const runtime = new Map();
 const storageCache = new Map();
+const workerLogs = { a: [], b: [] };
+const workerProjectLogs = new Map();
+let workerLastSave = 0;
 const CLOCK_TICKS = 100;
 const PANEL_PASSWORD = process.env.ZEX_PANEL_PASSWORD || cfg.password;
 const PORT = Number(process.env.PORT || cfg.port);
@@ -92,6 +98,8 @@ let state = {
   startedAt: Date.now(),
   settings: { name: 'ZEX PERSONAL PANEL', slug: 'zex' },
   webhooks: [],
+  worker: {},
+  workerToken: null,
 };
 try { state = Object.assign(state, JSON.parse(fs.readFileSync(STATE_PATH, 'utf8'))); } catch (e) {}
 function normalizeState() {
@@ -108,6 +116,8 @@ function normalizeState() {
   state.startedAt = state.startedAt || Date.now();
   state.settings = Object.assign({ name: 'ZEX PERSONAL PANEL', slug: 'zex' }, state.settings || {});
   state.webhooks = Array.isArray(state.webhooks) ? state.webhooks : [];
+  state.worker = state.worker && typeof state.worker === 'object' ? state.worker : {};
+  if (!state.workerToken) state.workerToken = crypto.randomBytes(24).toString('hex');
 }
 normalizeState();
 
@@ -342,6 +352,8 @@ function renderKernel(slot, role, startAfterEpoch, stopAtEpoch, bundleB64) {
   for (let i = 0; i < bundleB64.length; i += 76) chunks.push('    "' + bundleB64.slice(i, i + 76) + '"');
   const lines = chunks.length ? chunks.join('\n') : '    ""';
   const out = tpl
+    .replace('PANEL_URL = "__PANEL_URL__"', 'PANEL_URL = ' + JSON.stringify(panelUrl()))
+    .replace('WORKER_TOKEN = "__WORKER_TOKEN__"', 'WORKER_TOKEN = ' + JSON.stringify(state.workerToken || ''))
     .replace('SLOT = "__SLOT__"', 'SLOT = ' + JSON.stringify(slot.toUpperCase()))
     .replace('ROLE = "__ROLE__"', 'ROLE = ' + JSON.stringify(role))
     .replace('START_AFTER_EPOCH = __START_AFTER__', 'START_AFTER_EPOCH = ' + Number(startAfterEpoch || 0))
@@ -669,6 +681,11 @@ function publicStatus() {
       slot, ref: s.ref, status: s.status, role: s.role, version: s.version,
       lastPush: s.lastPush, startedAt: s.startedAt, stopAt: s.stopAt, lastCheck: s.lastCheck,
       failure: s.failure, remainingMs: remainingMs(slot), running: isSessionRunning(slot),
+      worker: workerStatus(slot) ? {
+        receivedAt: workerStatus(slot).receivedAt, ageMs: workerStatus(slot).ageMs,
+        stale: workerStatus(slot).stale, role: workerStatus(slot).role,
+        projects: (workerStatus(slot).projects || []).length,
+      } : null,
     };
   }
   const reg = loadProjects();
@@ -681,7 +698,8 @@ function publicStatus() {
     sessions,
     projects: { count: reg.projects.length, updated_at: reg.updated_at },
     runtimeMode: RUNTIME_MODE,
-    runtime: RUNTIME_MODE === 'render' ? runtimeStatus() : [],
+    runtime: runtimeStatus(),
+    worker: workerSummary(),
     system: systemMetrics(),
     apiRequests: Number(state.apiRequests || 0),
     startedAt: state.startedAt || null,
@@ -705,7 +723,7 @@ function publicStatus() {
     log: memLog.slice(-120),
     limits: {
       stopSupported: false,
-      note: 'Quota-safe mode: only one session runs projects. Each worker self-stops at its 12h limit; the next session is prepared in advance with a start time after the old stop, so there is no duplicate execution.',
+      note: 'Kaggle-first: the active session runs projects and reports live CPU/RAM/storage to this panel. Each worker self-stops at its 12h limit; the next session is prepared in advance with a start time after the old stop, so there is no duplicate execution.',
     },
   };
 }
@@ -772,6 +790,25 @@ function detectStartCommand(p) {
   }[p.kind] || ['main.py', 'app.py', 'bot.py', 'worker.py', 'run.py', 'index.py'];
   const py = find(pyPreferred);
   if (py) return 'python3 -u ' + py;
+  const pyFiles = names.filter((n) => /\.py$/i.test(n) && !/(^|\/)(setup|conftest)\.py$/i.test(n) && !/(^|\/)(__pycache__|\.venv|venv|site-packages|node_modules)\//.test(n));
+  if (pyFiles.length) {
+    const rank = (name) => {
+      const base = name.split('/').pop().toLowerCase();
+      const text = contentText(files[name] || '').slice(0, 200000);
+      let score = 0;
+      if (pyPreferred.includes(base)) score += 100;
+      if (/(bot|user|main|app|run|server|worker|start)/.test(base)) score += 30;
+      if (base === '__main__.py') score += 25;
+      if (/if\s+__name__\s*==\s*['"]__main__['"]/.test(text)) score += 90;
+      if (/asyncio\.run\s*\(/.test(text)) score += 45;
+      if (/(TelegramClient|aiogram|pyrogram|discord\.|bot\.run|client\.run|uvicorn\.run|app\.run|FastAPI\s*\()/.test(text)) score += 35;
+      if (/(flask|django|aiohttp|telethon|python-telegram-bot)/i.test(text)) score += 15;
+      score -= (name.split('/').length - 1) * 3;
+      return score;
+    };
+    pyFiles.sort((a, b) => rank(b) - rank(a) || a.length - b.length);
+    return 'python3 -u ' + pyFiles[0];
+  }
   const nodePreferred = {
     discord_bot: ['index.js', 'bot.js', 'main.js', 'server.js'],
     telegram_bot: ['index.js', 'bot.js', 'main.js', 'server.js'],
@@ -780,6 +817,21 @@ function detectStartCommand(p) {
   }[p.kind] || ['index.js', 'server.js', 'app.js', 'main.js'];
   const node = find(nodePreferred);
   if (node) return 'node ' + node;
+  const jsFiles = names.filter((n) => /\.(m?js|cjs)$/i.test(n) && !/(^|\/)(node_modules|dist|build)\//.test(n));
+  if (jsFiles.length) {
+    const rank = (name) => {
+      const base = name.split('/').pop().toLowerCase();
+      const text = contentText(files[name] || '').slice(0, 200000);
+      let score = 0;
+      if (nodePreferred.includes(base)) score += 100;
+      if (/(bot|user|main|app|run|server|worker|start|index)/.test(base)) score += 30;
+      if (/(listen\s*\(|createServer\s*\(|\.login\s*\(|Telegraf|Client\s*\(|express\s*\()/.test(text)) score += 40;
+      score -= (name.split('/').length - 1) * 3;
+      return score;
+    };
+    jsFiles.sort((a, b) => rank(b) - rank(a) || a.length - b.length);
+    return 'node ' + jsFiles[0];
+  }
   return '';
 }
 function normalizeProject(raw) {
@@ -1202,6 +1254,120 @@ function projectStorage(project) {
   storageCache.set(id, { at: Date.now(), value });
   return value;
 }
+function numOrNull(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+function workerStatus(slot) {
+  const w = state.worker && state.worker[slot];
+  if (!w || !w.receivedAt) return null;
+  const ageMs = Math.max(0, Date.now() - Number(w.receivedAt || 0));
+  return Object.assign({}, w, { ageMs, stale: ageMs > 150000 });
+}
+function workerSummary() {
+  const sessions = {};
+  for (const slot of SLOTS) {
+    const w = workerStatus(slot);
+    if (!w) continue;
+    sessions[slot] = {
+      slot, role: w.role || 'unknown', receivedAt: w.receivedAt, ageMs: w.ageMs, stale: w.stale,
+      session: w.session || null, system: w.system || null,
+      projects: (w.projects || []).map((p) => Object.assign({}, p)),
+    };
+  }
+  let active = sessions[state.active] && !sessions[state.active].stale ? sessions[state.active] : null;
+  if (!active) active = SLOTS.map((s) => sessions[s]).find((x) => x && !x.stale) || null;
+  return { active, sessions, tokenSet: !!state.workerToken };
+}
+function sanitizeWorkerSystem(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const memory = raw.memory && typeof raw.memory === 'object' ? {
+    totalBytes: numOrNull(raw.memory.totalBytes), usedBytes: numOrNull(raw.memory.usedBytes),
+    availableBytes: numOrNull(raw.memory.availableBytes), percent: numOrNull(raw.memory.percent),
+  } : null;
+  const disk = raw.disk && typeof raw.disk === 'object' ? {
+    totalBytes: numOrNull(raw.disk.totalBytes), usedBytes: numOrNull(raw.disk.usedBytes),
+    freeBytes: numOrNull(raw.disk.freeBytes), percent: numOrNull(raw.disk.percent),
+  } : null;
+  return {
+    cpuPercent: numOrNull(raw.cpuPercent), cpuCount: numOrNull(raw.cpuCount),
+    loadavg: Array.isArray(raw.loadavg) ? raw.loadavg.slice(0, 3).map((x) => numOrNull(x)) : [],
+    memory, disk, uptimeMs: numOrNull(raw.uptimeMs), platform: raw.platform ? String(raw.platform).slice(0, 40) : null,
+  };
+}
+function sanitizeWorkerSession(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  return {
+    startedAt: raw.startedAt ? String(raw.startedAt).slice(0, 40) : null,
+    stopAt: numOrNull(raw.stopAt), remainingMs: numOrNull(raw.remainingMs),
+    elapsedSeconds: numOrNull(raw.elapsedSeconds), startAfterEpoch: numOrNull(raw.startAfterEpoch),
+    stopAtEpoch: numOrNull(raw.stopAtEpoch), version: raw.version ? String(raw.version).slice(0, 60) : null,
+  };
+}
+function ingestWorkerReport(body, slot) {
+  const projects = (Array.isArray(body.projects) ? body.projects : []).slice(0, 100).map((p) => {
+    if (!p || typeof p !== 'object') return null;
+    const id = slugify(p.id);
+    if (!id) return null;
+    const logs = Array.isArray(p.logs) ? p.logs.slice(-120).map((l) => String(l == null ? '' : l).slice(0, 1200)) : [];
+    if (logs.length) {
+      const prev = workerProjectLogs.get(id) || [];
+      workerProjectLogs.set(id, prev.concat(logs).slice(-600));
+    }
+    return {
+      id, name: String(p.name || id).slice(0, 120), kind: KINDS.includes(p.kind) ? p.kind : 'worker',
+      status: String(p.status || 'stopped').slice(0, 30), pid: numOrNull(p.pid),
+      cpuPercent: numOrNull(p.cpuPercent), memoryMb: numOrNull(p.memoryMb),
+      processes: numOrNull(p.processes), storageBytes: numOrNull(p.storageBytes),
+      codeBytes: numOrNull(p.codeBytes), depsBytes: numOrNull(p.depsBytes),
+      startedAt: numOrNull(p.startedAt), uptimeMs: numOrNull(p.uptimeMs),
+      restarts: numOrNull(p.restarts) || 0, error: p.error ? String(p.error).slice(0, 300) : null,
+      command: p.command ? String(p.command).slice(0, 300) : '',
+      autoStart: p.autoStart !== false,
+    };
+  }).filter(Boolean);
+  const logs = Array.isArray(body.logs) ? body.logs.slice(-300).map((l) => String(l == null ? '' : l).slice(0, 2000)) : [];
+  if (logs.length) workerLogs[slot] = workerLogs[slot].concat(logs).slice(-800);
+  const stored = {
+    slot, role: String(body.role || 'active').slice(0, 30), receivedAt: Date.now(),
+    session: sanitizeWorkerSession(body.session), system: sanitizeWorkerSystem(body.system),
+    projects, logs: [],
+  };
+  state.worker = state.worker || {};
+  state.worker[slot] = stored;
+  if (!workerLastSave || Date.now() - workerLastSave > 120000) {
+    workerLastSave = Date.now();
+    saveState();
+  }
+  return stored;
+}
+function kaggleRuntimeRows() {
+  const reg = loadProjects();
+  const byId = new Map();
+  for (const slot of SLOTS) {
+    const w = workerStatus(slot);
+    if (!w || w.stale) continue;
+    for (const row of w.projects || []) {
+      const p = (reg.projects || []).find((x) => x.id === row.id);
+      if (!p || p.kind === 'website') continue;
+      const storage = projectStorage(p);
+      const codeBytes = row.codeBytes == null ? storage.codeBytes : row.codeBytes;
+      const storageBytes = row.storageBytes == null ? storage.diskBytes : row.storageBytes;
+      byId.set(row.id, {
+        id: row.id, name: p.name || row.name || row.id, kind: p.kind || row.kind || 'worker',
+        status: row.status || 'stopped', pid: row.pid, memoryMb: row.memoryMb,
+        cpuPercent: row.cpuPercent, processes: row.processes, startedAt: row.startedAt,
+        uptimeMs: row.uptimeMs || 0, restarts: row.restarts || 0, error: row.error || null,
+        lastExit: null, autoStart: row.autoStart !== false, installing: row.status === 'installing',
+        command: row.command || p.start_command || '', public_url: p.public_url || '',
+        storageBytes, codeBytes, depsBytes: row.depsBytes == null ? Math.max(0, storageBytes - codeBytes) : row.depsBytes,
+        source: 'kaggle', slot, heartbeatAt: w.receivedAt,
+        logs: (workerProjectLogs.get(row.id) || []).slice(-30),
+      });
+    }
+  }
+  return [...byId.values()];
+}
 function systemMetrics() {
   const meminfo = readMemInfo();
   const cg = cgroupMemory();
@@ -1234,7 +1400,7 @@ function runtimeStatus() {
   for (const p of reg.projects || []) {
     if (p.kind !== 'website' && !runtime.has(p.id)) runtimeEntry(p.id);
   }
-  return [...runtime.values()].filter((r) => (reg.projects || []).some((x) => x.id === r.id && x.kind !== 'website')).map((r) => {
+  const rows = [...runtime.values()].filter((r) => (reg.projects || []).some((x) => x.id === r.id && x.kind !== 'website')).map((r) => {
     const p = (reg.projects || []).find((x) => x.id === r.id) || {};
     const ps = projectProcessStats(r.proc ? r.proc.pid : null, r);
     return {
@@ -1244,10 +1410,16 @@ function runtimeStatus() {
       restarts: r.restarts, error: r.error, lastExit: r.lastExit,
       autoStart: p.auto_start !== false, installing: r.installing,
       command: p.start_command || '', public_url: p.public_url || '',
-      storageBytes: projectStorage(p).diskBytes,
+      storageBytes: projectStorage(p).diskBytes, source: 'render',
       logs: r.logs.slice(-30),
     };
   });
+  const merged = new Map(rows.map((r) => [r.id, r]));
+  for (const row of kaggleRuntimeRows()) {
+    const cur = merged.get(row.id);
+    if (!cur || cur.status !== 'running' || row.status === 'running') merged.set(row.id, row);
+  }
+  return [...merged.values()];
 }
 function metricsSnapshot() {
   const reg = loadProjects();
@@ -1257,19 +1429,24 @@ function metricsSnapshot() {
   const projects = (reg.projects || []).map((p) => {
     const live = byId[p.id] || {};
     const storage = projectStorage(p);
+    const storageBytes = live.source === 'kaggle' && live.storageBytes != null ? live.storageBytes : storage.diskBytes;
+    const codeBytes = live.codeBytes != null ? live.codeBytes : storage.codeBytes;
+    const depsBytes = live.depsBytes != null ? live.depsBytes : Math.max(0, storageBytes - codeBytes);
     return {
       id: p.id, name: p.name || p.id, kind: p.kind,
       status: p.kind === 'website' ? 'static' : (live.status || 'stopped'),
       pid: live.pid || null,
       cpuPercent: live.cpuPercent == null ? null : live.cpuPercent,
       memoryMb: live.memoryMb == null ? null : live.memoryMb,
-      storageBytes: storage.diskBytes,
-      codeBytes: storage.codeBytes,
+      storageBytes, codeBytes, depsBytes,
       files: storage.files,
       uptimeMs: live.uptimeMs || 0,
       restarts: live.restarts || 0,
       autoStart: p.auto_start !== false,
       error: live.error || null,
+      source: live.source || (p.kind === 'website' ? 'panel' : 'render'),
+      slot: live.slot || null,
+      heartbeatAt: live.heartbeatAt || null,
       public_url: p.public_url || '',
     };
   });
@@ -1281,11 +1458,14 @@ function metricsSnapshot() {
     storageBytes: projects.reduce((a, p) => a + (p.storageBytes || 0), 0),
     memoryMb: Math.round(projects.reduce((a, p) => a + (p.memoryMb || 0), 0) * 10) / 10,
   };
-  return { ok: true, at: Date.now(), system: systemMetrics(), projects, totals };
+  return { ok: true, at: Date.now(), system: systemMetrics(), worker: workerSummary(), projects, totals };
 }
 function runtimeLogs(id) {
+  const workerLog = workerProjectLogs.get(id) || [];
   const r = runtime.get(id);
-  return r ? r.logs.slice(-400) : [];
+  if (workerLog.length && (!r || !r.proc || r.status !== 'running')) return workerLog.slice(-400);
+  if (r && r.logs.length) return r.logs.slice(-400);
+  return workerLog.slice(-400);
 }
 function startAutoRuntime() {
   if (RUNTIME_MODE !== 'render' || process.env.ZEX_NO_RUNTIME) return;
@@ -1410,6 +1590,20 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, { ok: true, token: t });
     }
     if (p === '/api/health') return json(res, 200, { ok: true });
+    if (p === '/api/worker/report' && req.method === 'POST') {
+      const supplied = String(req.headers['x-zex-worker-token'] || '');
+      const expected = String(state.workerToken || '');
+      const a = Buffer.from(supplied);
+      const b = Buffer.from(expected);
+      if (!expected || a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+        return json(res, 401, { ok: false, error: 'invalid worker token' });
+      }
+      const body = await readBody(req);
+      const slot = String(body.slot || '').toLowerCase() === 'b' ? 'b' : 'a';
+      const stored = ingestWorkerReport(body, slot);
+      log('WORKER report slot=' + slot.toUpperCase() + ' projects=' + stored.projects.length + ' cpu=' + (stored.system && stored.system.cpuPercent != null ? stored.system.cpuPercent : '?') + '%');
+      return json(res, 200, { ok: true, slot, receivedAt: stored.receivedAt });
+    }
     if (!auth(req)) return json(res, 401, { ok: false, error: 'unauthorized' });
 
     if (p === '/api/status') {
@@ -1417,6 +1611,9 @@ const server = http.createServer(async (req, res) => {
     }
     if (p === '/api/metrics' && req.method === 'GET') {
       return json(res, 200, metricsSnapshot());
+    }
+    if (p === '/api/worker' && req.method === 'GET') {
+      return json(res, 200, Object.assign({ ok: true }, workerSummary()));
     }
     if (p === '/api/logs') {
       return json(res, 200, { ok: true, log: memLog.slice(-300) });
