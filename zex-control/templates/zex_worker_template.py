@@ -139,6 +139,10 @@ def _prepare_projects(bundle):
         }
         with open(os.path.join(pdir, ".zex-project.json"), "w", encoding="utf-8") as fh:
             json.dump(cfg, fh, indent=2)
+        try:
+            os.remove(os.path.join(pdir, ".zex-deps-ready"))
+        except Exception:
+            pass
         project["_code_bytes"] = code_bytes
         _project_meta[pid] = {
             "id": pid, "name": cfg["name"], "kind": cfg["kind"], "enabled": cfg["enabled"],
@@ -181,21 +185,21 @@ def _install_deps(pdir):
     if not os.path.exists(req) and not os.path.exists(pkg):
         return
     if not _has_internet():
-        _say("[zex] no internet; dependency install skipped")
-        try:
-            with open(marker, "w", encoding="utf-8") as fh:
-                fh.write("skipped: no internet\n")
-        except Exception:
-            pass
+        _say("[zex] no internet; dependency install skipped for {}".format(os.path.basename(pdir)))
         return
+    ok = True
     if os.path.exists(req):
         try:
-            _say("[zex] installing python requirements")
-            subprocess.run(
+            _say("[zex] installing python requirements for {}".format(os.path.basename(pdir)))
+            proc = subprocess.run(
                 [sys.executable, "-m", "pip", "install", "--quiet", "--disable-pip-version-check", "-r", req],
-                cwd=pdir, timeout=300,
+                cwd=pdir, timeout=600,
             )
+            if proc.returncode != 0:
+                ok = False
+                _say("[zex] pip install exit code {} for {}".format(proc.returncode, os.path.basename(pdir)))
         except Exception as exc:
+            ok = False
             _say("[zex] pip install failed: {}".format(exc))
     if os.path.exists(pkg) and not os.path.isdir(os.path.join(pdir, "node_modules")) and shutil.which("npm"):
         try:
@@ -203,6 +207,8 @@ def _install_deps(pdir):
             subprocess.run(["npm", "install", "--omit=dev", "--no-audit", "--no-fund"], cwd=pdir, timeout=300)
         except Exception as exc:
             _say("[zex] npm install failed: {}".format(exc))
+    if not ok:
+        return
     try:
         with open(marker, "w", encoding="utf-8") as fh:
             fh.write("done\n")
@@ -502,9 +508,14 @@ def _report_once():
 
 
 def _report_loop():
+    _say("[zex] reporter started url={} token={}".format(PANEL_URL, "set" if WORKER_TOKEN else "missing"))
+    last_ok = 0.0
     while not _stop.is_set():
         try:
             _report_once()
+            if time.time() - last_ok > 300:
+                last_ok = time.time()
+                _say("[zex] report ok")
         except Exception as exc:
             _say("[zex] report failed: {}".format(exc))
         _stop.wait(REPORT_INTERVAL)
@@ -693,6 +704,13 @@ def main():
     _say("stop_at: {}".format(datetime.datetime.fromtimestamp(STOP_AT, datetime.timezone.utc).isoformat()))
     if ROLE == "active" and START_AFTER_EPOCH > time.time():
         _say("project start delayed until: {}".format(datetime.datetime.fromtimestamp(START_AFTER_EPOCH, datetime.timezone.utc).isoformat()))
+    for host in ("pypi.org", "zex-cloud-panel.onrender.com", "api.telegram.org"):
+        try:
+            probe = socket.create_connection((host, 443), 5)
+            probe.close()
+            _say("[zex] net {}:443 ok".format(host))
+        except Exception as exc:
+            _say("[zex] net {}:443 failed: {}".format(host, exc))
     _say("=" * 60)
     _write_status("starting")
 
