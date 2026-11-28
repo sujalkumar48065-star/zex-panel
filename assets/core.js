@@ -54,7 +54,7 @@ const endpoints=[
   ['POST','/api/runtime/restart','Restart a project'],
   ['GET','/api/runtime/logs?id=','Read live project logs']
 ];
-let current=(document.body&&document.body.dataset&&document.body.dataset.initialPage)||'overview';let masterVisible=false;let masterKeyValue='';let fmTargetId='';let panelStatus=null;let metricsMap={};let lastMetrics=null;
+let current=(document.body&&document.body.dataset&&document.body.dataset.initialPage)||'overview';let masterVisible=false;let masterKeyValue='';let fmTargetId='';let panelStatus=null;let metricsMap={};let lastMetrics=null;let projectCategory='all';let projectTab='overview';let selectedProjectId='';
 const $=s=>document.querySelector(s);const toast=m=>{let t=$('#toast');t.textContent=m;t.classList.add('show');clearTimeout(window.toastTimer);window.toastTimer=setTimeout(()=>t.classList.remove('show'),2600)};
 const btn=(label,act,cls='btn')=>`<button class="${cls}" data-action="${act}">${label}</button>`;
 function head(kicker,title,desc,actions=''){return `<div class="page-head"><div><div class="eyebrow">${kicker}</div><h1>${title}</h1><p>${desc}</p></div><div class="actions">${actions}</div></div>`}

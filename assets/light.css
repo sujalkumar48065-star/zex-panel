@@ -283,3 +283,26 @@ a{color:var(--blue)}
 .kg-worker{display:flex;gap:18px;flex-wrap:wrap;margin-top:14px;padding-top:12px;border-top:1px solid var(--line);font-size:12px;color:var(--muted)}
 .kg-worker b{color:var(--ink);font-weight:700}
 @media(max-width:640px){.kg-grid{grid-template-columns:1fr}.kg-active{font-size:18px}}
+
+/* ZEX 2026-11-28 — separated projects list + project detail pages */
+.project-open{cursor:pointer;transition:transform .18s,box-shadow .18s,border-color .18s}
+.project-open:hover{transform:translateY(-2px);box-shadow:0 14px 32px rgba(37,99,235,.10)}
+.project-open-actions{margin-top:13px}
+.project-tabs{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 16px}
+.project-tab{display:inline-flex;align-items:center;gap:7px;border:1px solid #d7e6fb;background:#fff;color:#31567a;border-radius:999px;padding:8px 13px;font:600 12px Manrope,sans-serif;cursor:pointer;transition:all .16s}
+.project-tab:hover{border-color:#93c5fd;background:#f4f9ff;color:#1d4ed8}
+.project-tab.active{border-color:#2563eb;background:#eff6ff;color:#1d4ed8;box-shadow:0 0 0 3px rgba(37,99,235,.08)}
+.project-tab span{display:inline-flex;align-items:center;justify-content:center;min-width:19px;height:19px;padding:0 5px;border-radius:999px;background:#e7f0ff;color:#2563eb;font:700 10px 'DM Mono',monospace}
+.project-tab.active span{background:#2563eb;color:#fff}
+.detail-tabs{margin-top:18px;padding-top:14px;border-top:1px solid var(--line)}
+.detail-grid{align-items:start}
+.project-stat-badge{font:700 18px Manrope,sans-serif;margin:5px 0 3px;color:#0b2a4a}
+.info-list{display:flex;flex-direction:column}
+.info-row{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;padding:10px 0;border-bottom:1px solid var(--line);font-size:12px}
+.info-row:last-child{border-bottom:0}
+.info-row span{color:var(--muted);flex:0 0 auto}
+.info-row b{text-align:right;color:#0b2a4a;font-weight:700;word-break:break-word;min-width:0}
+.info-row b a{color:#2563eb;text-decoration:none;word-break:break-all}
+.project-console{font-size:12px;line-height:1.9}
+.project-console>div{padding:1px 0}
+@media(max-width:760px){.info-row{flex-direction:column;gap:4px}.info-row b{text-align:left}.project-tab{font-size:11px;padding:7px 10px}}

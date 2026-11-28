@@ -108,7 +108,7 @@ function renderKaggleSessions(){
   kgSet('kgNext',next);
 }
 async function loadMetrics(){
-  try{const m=await zexApi('/api/metrics');lastMetrics=m;metricsMap={};(m.projects||[]).forEach(x=>{metricsMap[x.id]=x});updateSystemHealth();renderKaggleSessions();const cards=document.getElementById('liveProjectCards');if(cards)cards.innerHTML=projectCards();renderRuntimePanel('liveRuntimePanel');renderRuntimePanel('runtimeLivePanel');if(document.getElementById('monProjectTable'))renderMonitoringTable();return m}
+  try{const m=await zexApi('/api/metrics');lastMetrics=m;metricsMap={};(m.projects||[]).forEach(x=>{metricsMap[x.id]=x});updateSystemHealth();renderKaggleSessions();const cards=document.getElementById('liveProjectCards');if(cards)cards.innerHTML=projectCards();renderRuntimePanel('liveRuntimePanel');renderRuntimePanel('runtimeLivePanel');if(document.getElementById('monProjectTable'))renderMonitoringTable();if(current==='projects')refreshProjectPage();if(current==='project')refreshProjectDetail();return m}
   catch(e){return null}
 }
 
@@ -139,7 +139,27 @@ async function loadProjects(){
     const info=document.getElementById('projectsKaggleInfo');
     if(info&&s){const sa=(s.sessions&&s.sessions.a)||{};const sb=(s.sessions&&s.sessions.b)||{};info.textContent='Kaggle-first runtime · active '+String(s.active||'—').toUpperCase()+' · A v'+(sa.version||'—')+' ('+(sa.status||'—')+') · B v'+(sb.version||'—')+' ('+(sb.status||'—')+') · worker '+(s.worker&&s.worker.active?'live':'waiting')+' · last backup '+(s.lastBackup?new Date(s.lastBackup).toLocaleString():'—')}
     fillSessionStats(s);updateSystemHealth();fillFileSelect();
+    if(current==='projects')refreshProjectPage();
+    if(current==='project')refreshProjectDetail();
   }catch(e){const el=document.getElementById('zexProjects');if(el)el.innerHTML='<div style="color:var(--amber)">'+zpEsc(e.message)+'</div>';const info=document.getElementById('projectsKaggleInfo');if(info)info.textContent='Backend: '+e.message;if(projectsRetries<5){projectsRetries++;setTimeout(()=>{if(current==='projects'||current==='overview')loadProjects()},4000)}}
+}
+async function loadProjectDetail(){
+  if(!selectedProjectId)return;
+  const id=selectedProjectId;
+  await loadProjects();
+  if(current!=='project'||selectedProjectId!==id)return;
+  refreshProjectDetail();
+  if(projectTab==='console')await loadProjectConsole();
+}
+async function loadProjectConsole(){
+  const el=document.getElementById('projectConsoleLogs');if(!el||!selectedProjectId)return;
+  const st=document.getElementById('projectConsoleStatus');if(st)st.textContent='LOADING…';
+  try{
+    const d=await zexApi('/api/runtime/logs?id='+encodeURIComponent(selectedProjectId));
+    const lines=(d.log||[]).slice(-300);
+    el.innerHTML=lines.map(l=>'<div>'+zpEsc(l)+'</div>').join('')||'No logs yet. Worker report ke baad output yahan aayega.';
+    if(st)st.textContent='LIVE · '+lines.length+' LINES';
+  }catch(e){el.innerHTML='<div style="color:var(--amber)">'+zpEsc(e.message)+'</div>';if(st)st.textContent='ERROR'}
 }
 async function loadOverview(){try{const s=await zexApi('/api/status');panelStatus=s;overviewRetries=0;try{const k=await zexApi('/api/key');masterKeyValue=k.key||''}catch(e){}fillSessionStats(s);refreshSidebar(s);await loadProjects();await loadLiveRuntime();fillSessionStats(s);updateSystemHealth();renderKaggleSessions();refreshSidebar(s)}catch(e){const st=document.getElementById('platformStatusText');if(st)st.textContent='Backend wake-up · retrying…';if(overviewRetries<5){overviewRetries++;setTimeout(()=>{if(current==='overview')loadOverview()},4000)}else toast('Backend: '+e.message)}}
 async function loadConsole(){
@@ -295,6 +315,8 @@ function updateRuntimeBanner(){
 async function loadLiveRuntime(){
   try{const d=await zexApi('/api/runtime');runtimeMap={};(d.projects||[]).forEach(r=>{runtimeMap[r.id]=r});renderRuntimePanel('liveRuntimePanel');renderRuntimePanel('runtimeLivePanel');updateRuntimeBanner();const cards=document.getElementById('liveProjectCards');if(cards)cards.innerHTML=projectCards();const el=document.getElementById('zexProjects');if(el&&current==='projects'&&!document.getElementById('modalBackdrop').classList.contains('show')){el.innerHTML=liveProjects.map(p=>`<div class="switch"><div><b>${zpEsc(p.name||p.id)}</b><div class="key-note" style="margin:4px 0 0">${zpEsc(kindLabel(p.kind))} · ${zpEsc(p.id)} · ${p.kind==='website'?(p.public_url||('/s/'+p.id+'/')):zpEsc(p.start_command||'auto-detect')} · ${Object.keys(p.files||{}).length} file(s)</div></div><div style="display:flex;gap:6px;align-items:center">${p.kind!=='website'?runtimeBadge(runtimeMap[p.id]):'<span class="runtime-pill ok">Static</span>'}${btn('Manage','manage-'+liveProjects.indexOf(p),'btn ghost')}</div></div>`).join('')||'<div class="empty">No projects yet. Create your first project.</div>'}
     await loadMetrics();
+    if(current==='projects')refreshProjectPage();
+    if(current==='project'){refreshProjectDetail();if(projectTab==='console')loadProjectConsole()}
   }catch(e){/* keep last known state */}
 }
 async function runtimeAction(id,action){

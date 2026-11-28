@@ -1,5 +1,5 @@
 function reloadCurrentPage(){
-  const loaders={overview:loadOverview,projects:loadProjects,deployments:loadDeployments,console:loadConsole,files:loadFiles,backups:loadBackups,monitoring:loadMonitoring,api:loadApi,settings:loadSettings,webhooks:loadWebhooks,admin:loadAdmin,runtime:loadRuntime};
+  const loaders={overview:loadOverview,projects:loadProjects,project:loadProjectDetail,deployments:loadDeployments,console:loadConsole,files:loadFiles,backups:loadBackups,monitoring:loadMonitoring,api:loadApi,settings:loadSettings,webhooks:loadWebhooks,admin:loadAdmin,runtime:loadRuntime};
   if(loaders[current])loaders[current]();
 }
 async function copyMasterKey(){
@@ -12,7 +12,14 @@ document.addEventListener('click',async e=>{
   if(act==='new-project'||act==='deploy'||act==='zex-new'){projectModal(null);return}
   if(act.startsWith('new-kind:')){projectModal({kind:act.slice(9)});return}
   if(act.startsWith('template:')){const kind=act.slice(9);projectModal({name:'',id:'',kind,start_command:'',files:{},env:{}});return}
-  if(act.startsWith('manage-')){const p=liveProjects[+act.split('-')[1]];if(p)manageProject(p);return}
+  if(act.startsWith('manage-')){const p=liveProjects[+act.split('-')[1]];if(p){selectedProjectId=p.id;projectTab='overview';current='project';render()}return}
+  if(act.startsWith('open-project:')){selectedProjectId=act.slice(13);projectTab='overview';current='project';render();return}
+  if(act==='project-back'){current='projects';render();return}
+  if(act.startsWith('project-filter:')){projectCategory=act.slice(15)||'all';render();return}
+  if(act.startsWith('project-tab:')){projectTab=act.slice(12)||'overview';render();return}
+  if(act==='project-console-refresh'){loadProjectConsole();return}
+  if(act==='project-upload'){if(!selectedProjectId){toast('Project select karo');return}fmTargetId=selectedProjectId;document.getElementById('projectFileInput')?.click();return}
+  if(act==='noop'){e.preventDefault();return}
   if(act.startsWith('zex-edit:')){const p=zexProjectsMap[act.slice(9)];if(p)projectModal(p);return}
   if(act.startsWith('rt-live-')){const m=act.match(/^rt-live-(start|stop|restart|logs):(.+)$/);if(m){if(m[1]==='logs')showRuntimeLogs(m[2]);else runtimeAction(m[2],m[1]);return}}
   if(act.startsWith('zex-del:')){
@@ -58,9 +65,9 @@ document.addEventListener('keydown',e=>{if((e.metaKey||e.ctrlKey)&&e.key.toLower
 $('#content').addEventListener('change',async e=>{
   if(e.target.id==='consoleProject'){await loadConsole();return}
   if(e.target.id==='fmSelect'){await loadFiles();return}
-  if(e.target.id==='fileInput'){
-    if(!fmTargetId){toast('Select a project in File manager first');return}
-    try{await uploadFilesToProject(fmTargetId,e.target.files)}catch(err){toast(err.message)}finally{e.target.value=''}
+  if(e.target.id==='fileInput'||e.target.id==='projectFileInput'){
+    if(!fmTargetId){toast('Select a project first');return}
+    try{await uploadFilesToProject(fmTargetId,e.target.files);if(current==='project')await loadProjectDetail()}catch(err){toast(err.message)}finally{e.target.value=''}
   }
 });
 (function(){
